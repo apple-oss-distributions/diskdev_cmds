@@ -33,8 +33,6 @@
 	Copyright:	© 1996-1999 by Apple Computer, Inc., all rights reserved.
 */
 
-#define hasHFSPlusAPIs 0
-
 
 #include "BTree.h"
 #include "Scavenger.h"
@@ -438,7 +436,7 @@ OSErr MapFileBlockC (
 	SFCB			*fcb,				// FCB of file
 	UInt32			numberOfBytes,		// number of contiguous bytes desired
 	UInt32			sectorOffset,		// starting offset within file (in 512-byte sectors)
-	UInt32			*startSector,		// first 512-byte volume sector (NOT an allocation block)
+	UInt64			*startSector,		// first 512-byte volume sector (NOT an allocation block)
 	UInt32			*availableBytes)	// number of contiguous bytes (up to numberOfBytes)
 {
 	OSErr				err;
@@ -451,7 +449,7 @@ OSErr MapFileBlockC (
 	UInt32				nextFABN;				// file allocation block of block after end of found extent
 	UInt32				dataEnd;				// (offset) end of range that is contiguous (in sectors)
 	UInt32				startBlock;				// volume allocation block corresponding to firstFABN
-	UInt32				temp;
+	UInt64				temp;
 	
 	
 //	LogStartTime(kTraceMapFileBlock);
@@ -480,12 +478,7 @@ OSErr MapFileBlockC (
 	//
 	
 	// Get fork's physical size, in sectors
-#if hasHFSPlusAPIs
-	if (fcb->fcbFlags & fcbLargeFileMask)
-		temp = BytesToSectors(fcb->fcbPhysicalSize);
-	else
-#endif
-		temp = fcb->fcbPhysicalSize >> kSectorShift;
+	temp = fcb->fcbPhysicalSize >> kSectorShift;
 	dataEnd = nextFABN * allocBlockSize;		// Assume valid data through end of this extent
 	if (temp < dataEnd)							// Is PEOF shorter?
 		dataEnd = temp;							// Yes, so only map up to PEOF
@@ -494,7 +487,7 @@ OSErr MapFileBlockC (
 	//	Compute the absolute sector number that contains the offset of the given file
 	//
 	temp  = sectorOffset - (firstFABN * allocBlockSize);	// offset in sectors from start of this extent
-	temp += startBlock * allocBlockSize;			// offset in sectors from start of allocation block space
+	temp += (UInt64)startBlock * (UInt64)allocBlockSize;	// offset in sectors from start of allocation block space
 	if (vcb->vcbSignature == kHFSPlusSigWord)
 		temp += vcb->vcbEmbeddedOffset/512;		// offset into the wrapper
 	else
@@ -561,7 +554,7 @@ static OSErr ReleaseExtents(
 			break;
 		}
 
-		err = BlockDeallocate( vcb, extentRecord[extentIndex].startBlock, numAllocationBlocks );
+		err = ReleaseBitmapBits( extentRecord[extentIndex].startBlock, numAllocationBlocks );
 		if ( err != noErr )
 			break;
 					
@@ -733,6 +726,8 @@ OSErr DeallocateFile(SVCB *vcb, CatalogRecord * fileRec)
 
 	if (recordDeleted)
 		(void) FlushExtentFile(vcb);
+	
+	MarkVCBDirty(vcb);
 		
 	return (errDF ? errDF : errRF);
 }
@@ -807,26 +802,19 @@ OSErr ExtendFileC (
 	//
 	//	Determine the physical EOF in allocation blocks
 	//
-#if hasHFSPlusAPIs
-	if (fcb->fcbFlags & fcbLargeFileMask)
-		eofBlocks = BytesToBlocks(&fcb->fcbPhysicalSize, vcb->vcbBlockSize);
-	else
-#endif
-		eofBlocks = fcb->fcbPhysicalSize / vcb->vcbBlockSize;
+	eofBlocks = fcb->fcbPhysicalSize / vcb->vcbBlockSize;
 
 	//
 	//	Make sure the request won't make the file too big (>=2GB).
-	//	[2350148] Always limit HFS files, even if opened with fcbLargeFileMask.
+	//	[2350148] Always limit HFS files.
 	//	¥¥	Shouldn't really fail if allOrNothing is false
 	//	¥¥	Adjust for clump size here?
 	//
-#if hasHFSPlusAPIs
-	if ((fcb->fcbFlags & fcbLargeFileMask) && (vcb->vcbSignature == kHFSPlusSigWord))
+	if ( vcb->vcbSignature == kHFSPlusSigWord )
 	{
-		//	HFS Plus file opened with OpenFork.  Allow it to grow beyond 2GB.
+		//	Allow it to grow beyond 2GB.
 	}
 	else
-#endif
 	{
 		UInt32 maxFileBlocks;	//	max legal EOF, in blocks
 		maxFileBlocks = (kTwoGigSectors-1) / sectorsPerBlock;
@@ -1022,12 +1010,7 @@ ErrorExit:
 Exit:
 	*actualSectorsAdded = blocksAdded * sectorsPerBlock;
 	if (blocksAdded) {
-#if hasHFSPlusAPIs
-		if (fcb->fcbFlags & fcbLargeFileMask)
-			MultiplyUInt32IntoUInt64((UInt64*)&fcb->fcbPhysicalSize, eofBlocks, vcb->vcbBlockSize);
-		else
-#endif
-			fcb->fcbPhysicalSize = eofBlocks * vcb->vcbBlockSize;
+		fcb->fcbPhysicalSize = (UInt64)eofBlocks * (UInt64)vcb->vcbBlockSize;
 		fcb->fcbFlags |= fcbModifiedMask;
 	}
 
@@ -1100,12 +1083,7 @@ OSErr TruncateFileC (
 		forkType = kDataForkType;
 
 	//	Compute number of allocation blocks currently in file
-#if hasHFSPlusAPIs
-	if (fcb->fcbFlags & fcbLargeFileMask)
-		physNumBlocks = BytesToSectors(fcb->fcbPhysicalSize) / sectorsPerBlock;
-	else
-#endif
-		physNumBlocks = fcb->fcbPhysicalSize / vcb->vcbBlockSize;
+	physNumBlocks = fcb->fcbPhysicalSize / vcb->vcbBlockSize;
 	
 	//
 	//	Round newPEOF up to a multiple of the allocation block size.  If new size is
@@ -1125,12 +1103,7 @@ OSErr TruncateFileC (
 	//
 	//	Update FCB's length
 	//
-#if hasHFSPlusAPIs
-	if (fcb->fcbFlags & fcbLargeFileMask)
-		MultiplyUInt32IntoUInt64((UInt64*)&fcb->fcbPhysicalSize, nextBlock, vcb->vcbBlockSize);
-	else
-#endif
-		fcb->fcbPhysicalSize = nextBlock * vcb->vcbBlockSize;
+	fcb->fcbPhysicalSize = (UInt64)nextBlock * (UInt64)vcb->vcbBlockSize;
 	fcb->fcbFlags |= fcbModifiedMask;
 	
 	//
@@ -1714,121 +1687,6 @@ static OSErr MapFileBlockFromFCB(
 }
 
 
-#if 0
-void AdjustEOF(SFCB *sourceFCB)
-{
-	OSErr		err;
-	VCB		*vcb;			//	sourceFCB's volume
-	SFCB		*destFCB;		//	A matching FCB
-	short		refnum;			//	Used for iterating over FCBs
-	Boolean		isHFSPlus;		//	True if sourceFCB is on an HFS Plus volume
-	UInt8		resourceFlag;	//	Contains fcbResourceMask bit from fcbFlags
-	SInt32		pinnedEOF;
-	SInt32		pinnedPhysEOF;
-#if hasHFSPlusAPIs
-	UInt64		wideEOF;
-	UInt64		widePhysEOF;
-#endif
-
-	vcb = sourceFCB->fcbVolume;
-	sourceFCB->fcbFlags |= fcbModifiedMask;
-	resourceFlag = sourceFCB->fcbFlags & fcbResourceMask;
-	
-	isHFSPlus = (vcb->vcbSignature == kHFSPlusSigWord);
-
-#if hasHFSPlusAPIs	
-	//	Determine the EOF and physical EOF values to propagate.
-	if (sourceFCB->fcbFlags & fcbLargeFileMask) {
-		UInt32		maxPinnedSize;
-		maxPinnedSize = (0x7FFFFFFF / vcb->vcbAlBlkSiz) * vcb->vcbAlBlkSiz;
-
-		wideEOF = sourceFCB->fcbLogicalSize;
-		widePhysEOF = sourceFCB->fcbPhysicalSize;
-		
-		// pin endOfFile
-		if (wideEOF > maxPinnedSize)
-			pinnedEOF = maxPinnedSize;
-		else
-			pinnedEOF = sourceFCB->fcbLogicalSize;
-		sourceFCB->fcbEOF = pinnedEOF;
-		
-		// pin physicalEOF
-		if (widePhysEOF > maxPinnedSize)
-			pinnedPhysEOF = maxPinnedSize;
-		else
-			pinnedPhysEOF = sourceFCB->fcbPhysicalSize;
-		sourceFCB->fcbPhysicalSize = pinnedPhysEOF;
-	}
-	else {
-		pinnedEOF = sourceFCB->fcbEOF;
-		pinnedPhysEOF = sourceFCB->fcbPhysicalSize;
-		
-		wideEOF = pinnedEOF;
-		widePhysEOF = pinnedPhysEOF;
-	}
-#else
-	pinnedEOF = sourceFCB->fcbLogicalSize;
-	pinnedPhysEOF = sourceFCB->fcbPhysicalSize;
-#endif
-
-	//	Loop through FCBs for same file.  If same fork, update their sizes and extents.
-	refnum = 0;
-	while (noErr == (err = LocateFCB(vcb, sourceFCB->fcbFileID, &refnum, &destFCB))) {
-		if (destFCB == sourceFCB)
-			continue;					//	skip the source FCB
-		
-		if ((destFCB->fcbFlags & fcbResourceMask) != resourceFlag)
-			continue;					//	skip if different fork
-
-#if hasHFSPlusAPIs		
-		//	We found another FCB for the same fork.  Copy the fields.
-		if (destFCB->fcbFlags & fcbLargeFileMask) {
-			destFCB->fcbLogicalSize = wideEOF;
-			destFCB->fcbPhysicalSize = widePhysEOF;
-		}
-#endif
-		destFCB->fcbLogicalSize = pinnedEOF;
-		destFCB->fcbPhysicalSize = pinnedPhysEOF;
-		destFCB->fcbSBlk = sourceFCB->fcbSBlk;	//	Used by MFS.  May be used by foreign file systems.
-				
-		//	Copy extent info, too
-		if (isHFSPlus) {			
-			CopyMemory(srcFCB->fcbExtents, destFCB->fcbExtents, sizeof(HFSPlusExtentRecord));
-		}
-		else {
-			destFCB->fcbExtRec[0] = sourceFCB->fcbExtRec[0];
-			destFCB->fcbExtRec[1] = sourceFCB->fcbExtRec[1];
-			destFCB->fcbExtRec[2] = sourceFCB->fcbExtRec[2];
-		}
-	}
-}
-#endif
-
-
-#if hasHFSPlusAPIs
-UInt32 BytesToBlocks(const UInt64 *bytes, UInt32 blockSize)
-{
-	UInt32			carry;
-	UnsignedWide	temp;
-	
-	temp = *((UnsignedWide *)bytes);
-
-	//	This loop divides "bytes" by "blockSize".  It assumes blockSize
-	//	is a power of two.  The division is done by shifting both numerator
-	//	and divisor until the divisor is one.
-	
-	while (blockSize > 1) {
-		blockSize >>= 1;
-		carry = (temp.hi & 1) ? 0x80000000 : 0;
-		temp.hi >>= 1;
-		temp.lo = carry | temp.lo >> 1;
-	}
-	
-	return temp.lo;
-}
-#endif
-
-
 //ÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑ
 //	Routine:	ZeroFileBlocks
 //
@@ -1855,7 +1713,7 @@ OSErr	ZeroFileBlocks( SVCB *vcb, SFCB *fcb, UInt32 startingSector, UInt32 number
 	UInt32					requestedBytes;
 	UInt32					actualBytes;									//	Bytes actually read by CacheReadInPlace
 	UInt32					bufferSizeSectors	= FSBufferSize >> kSectorShift;
-	UInt32					currentPosition		= startingSector << kSectorShift;
+	UInt64					currentPosition		= startingSector << kSectorShift;
 		
 	buffer	= AllocateMemory(FSBufferSize);
 	if ( buffer == NULL )
@@ -1969,7 +1827,7 @@ Boolean NodesAreContiguous(
 	if ( !ExtentsAreIntegral(extents, mask, &blocksChecked, &lastExtentReached) )
 		return false;
 
-	if (lastExtentReached || (blocksChecked * vcb->vcbBlockSize) >= fcb->fcbPhysicalSize)
+	if (lastExtentReached || ((UInt64)blocksChecked * (UInt64)vcb->vcbBlockSize) >= fcb->fcbPhysicalSize)
 		return true;
 
 	startBlock = blocksChecked;

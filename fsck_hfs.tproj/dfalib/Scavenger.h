@@ -32,6 +32,7 @@
 #include "BTree.h"
 #include "BTreePrivate.h"
 #include "CheckHFS.h"
+#include "BTreeScanner.h"
 
 #ifdef __cplusplus
 extern	"C" {
@@ -47,6 +48,11 @@ enum {
 
 enum {
 	kNoHint						= 0
+};
+
+
+enum {
+	kHFSRepairCatalogFileID = (kHFSBogusExtentFileID - 1) /* used to repair catalog file */
 };
 
 //
@@ -66,14 +72,16 @@ enum {
 #define	VBM_FNum	2				/* file number representing the volume bit map */
 #define	MDB_BlkN	2				/* logical block number for the MDB */
 
-#define kCalculatedExtentRefNum		( 4 )
-#define kCalculatedCatalogRefNum	(1*sizeof(SFCB) + 4)
-#define kCalculatedAllocationsRefNum	(2*sizeof(SFCB) + 4)
-#define kCalculatedAttributesRefNum	(3*sizeof(SFCB) + 4)
-#define kCalculatedRepairRefNum		(4*sizeof(SFCB) + 4)
+#define kCalculatedExtentRefNum			( 0 )
+#define kCalculatedCatalogRefNum		( 1*sizeof(SFCB) )
+#define kCalculatedAllocationsRefNum	( 2*sizeof(SFCB) )
+#define kCalculatedAttributesRefNum		( 3*sizeof(SFCB) )
+#define kCalculatedStartupRefNum		( 4*sizeof(SFCB) )
+#define kCalculatedRepairRefNum			( 5*sizeof(SFCB) )
 
 #define	Max_ABSiz	0x7FFFFE00		/* max allocation block size (multiple of 512 */
 #define	Blk_Size	512				/* size of a logical block */
+#define kHFSBlockSize 512			/* HFS block size */
 
 // only the lower 7 bits are considered to be invalid, all others are valid -djb
 #define	VAtrb_Msk	0x007F			/* volume attribute mask - invalid bits */
@@ -580,8 +588,8 @@ typedef struct SGlob {
 	UInt16				CBTStat;				//	scavenge status flags for catalog BTree 
 	UInt16				CatStat;				//	scavenge status flags for catalog file
 	UInt16				VeryMinorErrorsStat;	//	scavenge status flags for very minor errors
-	DrvQElPtr			DrvPtr;				//	pointer to driveQ element for target drive
-	UInt32				idSector;				//	location of id block alt MDB or VH
+	DrvQElPtr			DrvPtr;					//	pointer to driveQ element for target drive
+	UInt64				idSector;				//	location of id block alt MDB or VH
 	UInt32				TarID;					//	target ID (CNID of data structure being verified)
 	UInt32				TarBlock;				//	target block/node number being verified
 	SInt16				BTLevel;				//	current BTree enumeration level
@@ -640,8 +648,9 @@ typedef struct SGlob {
 
 	Boolean			cleanUnmount;
 	Boolean			guiControl;
-	int			logLevel;
-	int			chkLevel;
+	int				logLevel;
+	int				chkLevel;
+	BTScanState		scanState;
 
 	char			volumeName[256]; /* volume name in ASCII or UTF-8 */
 } SGlob, *SGlobPtr;
@@ -722,6 +731,7 @@ enum
 	repairLevelVolumeRecoverable,				//	Minor Volume corruption exists
 	repairLevelSomeDataLoss,					//	Overlapping extents, some data loss but no scavaging will get it back
 	repairLevelWillCauseDataLoss,				//	Missing leaf nodes, repair will lose nodes without scavaging (proceed at your own risk, check disk with other utils)
+	repairLevelCatalogBtreeRebuild,				//	Catalog Btree is damaged, repair may lose some data
 	repairLevelUnrepairable						//	DFA cannot repair volume
 };
 
@@ -1017,6 +1027,12 @@ extern	OSErr	CmpBlock( void *block1P, void *block2P, UInt32 length ); /* same as
 	
 extern	OSErr	ChkExtRec ( SGlobPtr GPtr, const void *extents );
 
+
+/* -------------------------- From SRebuildCatalogBTree.c ------------------------- */
+
+extern	OSErr 	RebuildCatalogBTree( SGlobPtr theSGlobPtr );
+
+
 /* ------------------------------- From SExtents.c -------------------------------- */
 OSErr	ZeroFileBlocks( SVCB *vcb, SFCB *fcb, UInt32 startingSector, UInt32 numberOfSectors );
 
@@ -1025,8 +1041,10 @@ OSErr MapFileBlockC (
 	SFCB			*fcb,				// FCB of file
 	UInt32			numberOfBytes,		// number of contiguous bytes desired
 	UInt32			sectorOffset,		// starting offset within file (in 512-byte sectors)
-	UInt32			*startSector,		// first 512-byte volume sector (NOT an allocation block)
+	UInt64			*startSector,		// first 512-byte volume sector (NOT an allocation block)
 	UInt32			*availableBytes);	// number of contiguous bytes (up to numberOfBytes)
+
+OSErr DeallocateFile(SVCB *vcb, CatalogRecord * fileRec);
 
 OSErr ExtendFileC (
 	SVCB		*vcb,				// volume that file resides on
@@ -1034,8 +1052,8 @@ OSErr ExtendFileC (
 	UInt32			sectorsToAdd,		// number of sectors to allocate
 	UInt32			flags,				// EFContig and/or EFAll
 	UInt32			*actualSectorsAdded); // number of bytes actually allocated
-
-OSErr DeallocateFile(SVCB *vcb, CatalogRecord * fileRec);
+	
+OSErr FlushExtentFile( SVCB *vcb );
 
 void ExtDataRecToExtents(
 	const HFSExtentRecord	oldExtents,
@@ -1053,7 +1071,7 @@ OSErr	CreateAttributesBTreeControlBlock( SGlobPtr GPtr );
 OSErr	CreateExtendedAllocationsFCB( SGlobPtr GPtr );
 
 
-OSErr	CacheWriteInPlace( SVCB *vcb, UInt32 fileRefNum,  HIOParam *iopb, UInt32 currentPosition,
+OSErr	CacheWriteInPlace( SVCB *vcb, UInt32 fileRefNum,  HIOParam *iopb, UInt64 currentPosition,
 	UInt32 maximumBytes, UInt32 *actualBytes );
 
 
@@ -1160,11 +1178,6 @@ CompareAttributeKeys			(const void *			searchKey,
 EXTERN_API( SFCB* )
 ResolveFCB						(short 					fileRefNum);
 
-EXTERN_API_C( void )
-HFSBlocksFromTotalSectors		(UInt32 				totalSectors,
-								 UInt32 *				blockSize,
-								 UInt16 *				blockCount);
-
 EXTERN_API_C( OSErr )
 ValidVolumeHeader				(HFSPlusVolumeHeader *	volumeHeader);
 
@@ -1268,7 +1281,7 @@ extern int utf_encodestr(const u_int16_t *, size_t, u_int8_t *, size_t *);
  */
 extern int   HardLinkCheckBegin(SGlobPtr gp, void** cookie);
 extern void  HardLinkCheckEnd(void * cookie);
-extern void  CaptureHardLink(void * cookie, UInt32 linkID, UInt32 fileID);
+extern void  CaptureHardLink(void * cookie, UInt32 linkID);
 extern int   CheckHardLinks(void *cookie);
 
 /*
@@ -1277,6 +1290,7 @@ extern int   CheckHardLinks(void *cookie);
 extern int  BitMapCheckBegin(SGlobPtr g);
 extern int  BitMapCheckEnd(void);
 extern int  CaptureBitmapBits(UInt32 startBit, UInt32 bitCount);
+extern int  ReleaseBitmapBits(UInt32 startBit, UInt32 bitCount);
 extern int  CheckVolumeBitMap(SGlobPtr g, Boolean repair);
 
 

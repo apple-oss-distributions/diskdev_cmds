@@ -21,6 +21,7 @@
  */
 
 #include "SRuntime.h"
+#include "Scavenger.h"
 #include "../cache.h"
 
 
@@ -30,7 +31,7 @@ extern OSErr MapFileBlockC (
 	SFCB *   fcb,
 	UInt32   numberOfBytes,
 	UInt32   sectorOffset,
-	UInt32 * startSector,
+	UInt64 * startSector,
 	UInt32 * availableBytes
 );
 
@@ -38,7 +39,10 @@ extern Cache_t fscache;
 
 
 static OSStatus  ReadFragmentedBlock (SFCB *file, UInt32 blockNum, BlockDescriptor *block);
-static OSStatus  WriteFragmentedBlock (SFCB *file, BlockDescriptor *block, int age);
+static OSStatus  WriteFragmentedBlock( 	SFCB *file, 
+										BlockDescriptor *block, 
+										int age, 
+										uint32_t writeOptions );
 static OSStatus  ReleaseFragmentedBlock (SFCB *file, BlockDescriptor *block, int age);
 
 
@@ -55,7 +59,7 @@ InitBlockCache(SVCB *volume)
  *  kGetEmptyBlock
  */
 OSStatus
-GetVolumeBlock (SVCB *volume, UInt32 blockNum, GetBlockOptions options, BlockDescriptor *block)
+GetVolumeBlock (SVCB *volume, UInt64 blockNum, GetBlockOptions options, BlockDescriptor *block)
 {
 	UInt32  blockSize;
 	SInt64  offset;
@@ -105,7 +109,7 @@ ReleaseVolumeBlock (SVCB *volume, BlockDescriptor *block, ReleaseBlockOptions op
 	age    = ((options & kTrashBlock) != 0);
 
 	if (options & (kMarkBlockDirty | kForceWriteBlock))
-		result = CacheWrite(cache, buffer, age);
+		result = CacheWrite(cache, buffer, age, 0);
 	else /* not dirty */
 		result = CacheRelease (cache, buffer, age);
 
@@ -121,7 +125,7 @@ ReleaseVolumeBlock (SVCB *volume, BlockDescriptor *block, ReleaseBlockOptions op
 OSStatus
 GetFileBlock (SFCB *file, UInt32 blockNum, GetBlockOptions options, BlockDescriptor *block)
 {
-	UInt32	diskBlock;
+	UInt64	diskBlock;
 	UInt32	contiguousBytes;
 	SInt64  offset;
 
@@ -136,7 +140,7 @@ GetFileBlock (SFCB *file, UInt32 blockNum, GetBlockOptions options, BlockDescrip
 
 	/* Map file block to volume block */
 	result = MapFileBlockC(file->fcbVolume, file, file->fcbBlockSize,
-			((blockNum * file->fcbBlockSize) >> kSectorShift),
+			(((UInt64)blockNum * (UInt64)file->fcbBlockSize) >> kSectorShift),
 			&diskBlock, &contiguousBytes);
 	if (result) return (result);
 
@@ -171,17 +175,21 @@ ReleaseFileBlock (SFCB *file, BlockDescriptor *block, ReleaseBlockOptions option
 	Cache_t * cache;
 	Buf_t *   buffer;
 	int       age;
+	uint32_t  writeOptions = 0;
 
 	cache  = (Cache_t *)file->fcbVolume->vcbBlockCache;
 	buffer = (Buf_t *) block->blockHeader;
 	age    = ((options & kTrashBlock) != 0);
 
+	if ( (options & kForceWriteBlock) == 0 )
+		/* only write if we're forced to */
+		writeOptions |= kLazyWrite;
+
 	if (options & (kMarkBlockDirty | kForceWriteBlock)) {
 		if (block->fragmented)
-			result = WriteFragmentedBlock(file, block, age);
+			result = WriteFragmentedBlock(file, block, age, writeOptions);
 		else
-			result = CacheWrite(cache, buffer, age);
-
+			result = CacheWrite(cache, buffer, age, writeOptions);
 	} else { /* not dirty */
 
 		if (block->fragmented)
@@ -215,9 +223,9 @@ SetFileBlockSize (SFCB *file, ByteCount blockSize)
 static OSStatus
 ReadFragmentedBlock (SFCB *file, UInt32 blockNum, BlockDescriptor *block)
 {
-	UInt32	sector;
+	UInt64	sector;
 	UInt32	fragSize, blockSize;
-	UInt32  fileOffset;
+	UInt64  fileOffset; 
 	SInt64  diskOffset;
 	SVCB *  volume;
 	int     i, maxFrags;
@@ -231,7 +239,7 @@ ReadFragmentedBlock (SFCB *file, UInt32 blockNum, BlockDescriptor *block)
 
 	blockSize = file->fcbBlockSize;
 	maxFrags = blockSize / volume->vcbBlockSize;
-	fileOffset = blockNum * blockSize;
+	fileOffset = (UInt64)blockNum * (UInt64)blockSize;
 	
 	buffer = (char *) AllocateMemory(blockSize);
 	bufs = (Buf_t **) AllocateClearMemory(maxFrags * sizeof(Buf_t *));
@@ -252,7 +260,7 @@ ReadFragmentedBlock (SFCB *file, UInt32 blockNum, BlockDescriptor *block)
 					&sector, &fragSize);
 		if (result) goto ErrorExit;
 
-		diskOffset = (SInt64) ((UInt64) sector) << kSectorShift;
+		diskOffset = (SInt64) (sector) << kSectorShift;
 		result = CacheRead (cache, diskOffset, fragSize, &bufs[i]);
 		if (result) goto ErrorExit;
 		
@@ -292,7 +300,7 @@ ErrorExit:
  *
  */
 static OSStatus
-WriteFragmentedBlock (SFCB *file, BlockDescriptor *block, int age)
+WriteFragmentedBlock( SFCB *file, BlockDescriptor *block, int age, uint32_t writeOptions )
 {
 	Cache_t * cache;
 	Buf_t **  bufs;  /* list of Buf_t pointers */
@@ -320,7 +328,7 @@ WriteFragmentedBlock (SFCB *file, BlockDescriptor *block, int age)
 		CopyMemory(buffer, bufs[i]->Buffer, fragSize);
 		
 		/* write it back to cache */
-		result = CacheRelease(cache, bufs[i], age);
+		result = CacheWrite(cache, bufs[i], age, writeOptions);
 		if (result) break;
 
 		buffer += fragSize;

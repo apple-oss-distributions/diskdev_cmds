@@ -3,21 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * "Portions Copyright (c) 1999 Apple Computer, Inc.  All Rights
- * Reserved.  This file contains Original Code and/or Modifications of
- * Original Code as defined in and that are subject to the Apple Public
- * Source License Version 1.0 (the 'License').  You may not use this file
- * except in compliance with the License.  Please obtain a copy of the
- * License at http://www.apple.com/publicsource and read it before using
- * this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * 
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
  * 
  * The Original Code and all software distributed under the License are
  * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License."
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -179,6 +180,22 @@ again:
 				sblock.fs_maxbpg = i;
 				continue;
 
+			case 'f':
+				name = "average file size";
+				i = atoi(*argv);
+				if (i < 1)
+					errx(10, "%s must be >= 1 (was %s)",
+					    name, *argv);
+				if (sblock.fs_avgfilesize == i) {
+					warnx("%s remains unchanged as %d",
+					    name, *argv);
+				} else {
+					warn("%s changes from %d to %d",
+					    name, sblock.fs_avgfilesize, i);
+					sblock.fs_avgfilesize = i;
+				}
+				continue;
+
 			case 'm':
 				name = "minimum percentage of free space";
 				if (argc < 1)
@@ -226,6 +243,22 @@ again:
 					warnx(OPTWARN, "space", "<", MINFREE);
 				continue;
 
+			case 's':
+				name = "expected number of files per directory";
+				i = atoi(*argv);
+				if (i < 1)
+					errx(10, "%s must be >= 1 (was %s)",
+					    name, *argv);
+				if (sblock.fs_avgfpdir == i) {
+					warnx("%s remains unchanged as %d",
+					    name, i);
+				} else {
+					warnx("%s changes from %d to %d",
+					    name, sblock.fs_avgfpdir, i);
+					sblock.fs_avgfpdir = i;
+				}
+				continue;
+
 			case 't':
 				name = "track skew in sectors";
 				if (argc < 1)
@@ -262,6 +295,10 @@ again:
 		    chg[sblock.fs_optim]);
 		fprintf(stdout, "\ttrack skew %d sectors\n",
 			sblock.fs_trackskew);
+		fprintf(stdout, "\texpected average file size %d\n",
+			sblock.fs_avgfilesize);
+		fprintf(stdout, "\texpexted number of files per directory %d\n",
+			sblock.fs_avgfpdir);
 		fprintf(stdout, "tunefs: no changes made\n");
 		exit(0);
 	}
@@ -289,6 +326,8 @@ usage()
 	fprintf(stderr, "\t-m minimum percentage of free space\n");
 	fprintf(stderr, "\t-o optimization preference (`space' or `time')\n");
 	fprintf(stderr, "\t-t track skew in sectors\n");
+	fprintf(stderr, "\t-f expected average file size\n");
+	fprintf(stderr, "\t-s expected number of files per directory\n");
 	exit(2);
 }
 

@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -73,7 +76,7 @@ chkquota_hfs(fsname, mntpt, qnp)
 	char *fsname, *mntpt;
 	register struct quotaname *qnp;
 {
-        int errs = 0;
+	int errs = 0;
 	
 	sync();
 
@@ -113,7 +116,7 @@ collectdata(const char* path, struct quotaname *qnp)
 	/* Search for items with uid != 0 */
 	query.qq_len = sizeof(struct quota_query);
 	query.qq_uid = 0;
-	options |= SRCHFS_NEGATEPARAMS;
+	options |= SRCHFS_NEGATEPARAMS | SRCHFS_SKIPLINKS;
 	searchblk.searchattrs.bitmapcount = ATTR_BIT_MAP_COUNT;
 	searchblk.searchattrs.commonattr = QQ_COMMON;
 	searchblk.searchparams1 = &query;
@@ -146,7 +149,7 @@ collectdata(const char* path, struct quotaname *qnp)
 
 		for (i = 0; i < nummatches; ++i) {
 			vntype = qap[i].qa_type;
-			filebytes = (vntype == VDIR) ? 0 :qap[i].qa_bytes;
+			filebytes = (vntype == VDIR) ? 0 : qap[i].qa_bytes;
 	
 			if (qnp->flags & HASGRP) {
 				fup = addid(qap[i].qa_gid, GRPQUOTA);

@@ -1,156 +1,66 @@
 /*
- * Copyright (c) 1999-2002 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 1999-2003 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * "Portions Copyright (c) 1999 Apple Computer, Inc.  All Rights
- * Reserved.  This file contains Original Code and/or Modifications of
- * Original Code as defined in and that are subject to the Apple Public
- * Source License Version 1.0 (the 'License').  You may not use this file
- * except in compliance with the License.  Please obtain a copy of the
- * License at http://www.apple.com/publicsource and read it before using
- * this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * 
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
  * 
  * The Original Code and all software distributed under the License are
  * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License."
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
-/*
- * Copyright (c) 1997-2000 Apple Computer, Inc. All Rights Reserved
- *
- *		MODIFICATION HISTORY (most recent first):
-*	   28-Jan-2000	Don Brady		Add support for hfs encoding modules (radar #2428608).
- *	   26-Jan-1999	Don Brady		Synchronize volume/root create dates (radar #2299171).
- *	   24-Jun-1998	Don Brady		Pass time zone info to hfs on mount (radar #2226387).
- */
-#include <sys/cdefs.h>
-#include <sys/param.h>
-#include <sys/mount.h>
+
 #include <sys/types.h>
+
+#include <sys/attr.h>
+#include <sys/mount.h>
 #include <sys/stat.h>
+#include <sys/sysctl.h>
+#include <sys/time.h>
+#include <sys/uio.h>
 #include <sys/vnode.h>
 #include <sys/wait.h>
-#include <sys/time.h> // gettimeofday
 
 #include <ctype.h>
 #include <err.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <grp.h>
+#include <limits.h>
 #include <pwd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <fcntl.h>
+
 #include <hfs/hfs_mount.h>
 #include <hfs/hfs_format.h>
-#include <sys/attr.h>
 
 /* Sensible wrappers over the byte-swapping routines */
 #include "hfs_endian.h"
 
-/* bek 5/20/98 - [2238317] - mntopts.h needs to be installed in a public place */
+#include "../disklib/mntopts.h"
 
-#define Radar_2238317 1
 
-#if ! Radar_2238317
-
-#include <mntopts.h>
-
-#else //  Radar_2238317
-
-/*-
- * Copyright (c) 1994
- *      The Regents of the University of California.  All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- * 3. All advertising materials mentioning features or use of this software
- *    must display the following acknowledgement:
- *	This product includes software developed by the University of
- *	California, Berkeley and its contributors.
- * 4. Neither the name of the University nor the names of its contributors
- *    may be used to endorse or promote products derived from this software
- *    without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ``AS IS'' AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- *
- *	@(#)mntopts.h	8.7 (Berkeley) 3/29/95
- */
-
-struct mntopt {
-	const char *m_option;	/* option name */
-	int m_inverse;		/* if a negative option, eg "dev" */
-	int m_flag;		/* bit to set, eg. MNT_RDONLY */
-	int m_altloc;		/* 1 => set bit in altflags */
-};
-
-/* User-visible MNT_ flags. */
-#define MOPT_ASYNC		{ "async",	0, MNT_ASYNC, 0 }
-#define MOPT_NODEV		{ "dev",	1, MNT_NODEV, 0 }
-#define MOPT_NOEXEC		{ "exec",	1, MNT_NOEXEC, 0 }
-#define MOPT_NOSUID		{ "suid",	1, MNT_NOSUID, 0 }
-#define MOPT_RDONLY		{ "rdonly",	0, MNT_RDONLY, 0 }
-#define MOPT_SYNC		{ "sync",	0, MNT_SYNCHRONOUS, 0 }
-#define MOPT_UNION		{ "union",	0, MNT_UNION, 0 }
-#define MOPT_USERQUOTA		{ "userquota",	0, 0, 0 }
-#define MOPT_GROUPQUOTA		{ "groupquota",	0, 0, 0 }
+/* This really belongs in mntopts.h */
 #define MOPT_PERMISSIONS	{ "perm", 1, MNT_UNKNOWNPERMISSIONS, 0 }
-
-/* Control flags. */
-#define MOPT_FORCE		{ "force",	0, MNT_FORCE, 0 }
-#define MOPT_UPDATE		{ "update",	0, MNT_UPDATE, 0 }
-#define MOPT_RO			{ "ro",		0, MNT_RDONLY, 0 }
-#define MOPT_RW			{ "rw",		1, MNT_RDONLY, 0 }
-
-/* This is parsed by mount(8), but is ignored by specific mount_*(8)s. */
-#define MOPT_AUTO		{ "auto",	0, 0, 0 }
-
-#define MOPT_FSTAB_COMPAT						\
-	MOPT_RO,							\
-	MOPT_RW,							\
-	MOPT_AUTO
-
-/* Standard options which all mounts can understand. */
-#define MOPT_STDOPTS							\
-	MOPT_USERQUOTA,							\
-	MOPT_GROUPQUOTA,						\
-	MOPT_FSTAB_COMPAT,						\
-	MOPT_NODEV,							\
-	MOPT_NOEXEC,							\
-	MOPT_NOSUID,							\
-	MOPT_RDONLY,							\
-	MOPT_UNION,								\
-	MOPT_PERMISSIONS
-
-void getmntopts __P((const char *, const struct mntopt *, int *, int *));
-extern int getmnt_silent;
-
-#endif // Radar_2238317
 
 struct mntopt mopts[] = {
 	MOPT_STDOPTS,
+	MOPT_PERMISSIONS,
 	MOPT_UPDATE,
 	{ NULL }
 };
@@ -164,6 +74,10 @@ gid_t	a_gid __P((char *));
 uid_t	a_uid __P((char *));
 mode_t	a_mask __P((char *));
 struct hfs_mnt_encoding * a_encoding __P((char *));
+struct hfs_mnt_encoding * get_encoding_pref __P((char *));
+int	get_encoding_bias __P((void));
+unsigned int  get_default_encoding(void);
+
 void	usage __P((void));
 
 
@@ -195,22 +109,47 @@ struct hfs_mnt_encoding {
 
 /*
  * Lookup table for hfs encoding names
+ * Note: Names must be in alphabetical order
  */
 struct hfs_mnt_encoding hfs_mnt_encodinglist[] = {
-	{ "Roman",	0 },	/* default */
-	{ "Japanese",	1 },
-	{ "ChineseTrad", 2 },
-	{ "Korean",	3 },
-	{ "Arabic",	4 },
-	{ "Hebrew",	5 },
-	{ "Greek",	6 },
-	{ "Cyrillic",	7 },
-	{ "Thai",	21 },
-	{ "ChineseSimp", 25 },
-	{ "Turkish",	35 },
-	{ "Croatian",	36 },
-	{ "Icelandic",	37 },
-	{ "Romanian",	38 },
+	{ "Arabic",	          4 },
+	{ "Armenian",        24 },
+	{ "Bengali",         13 },
+	{ "Burmese",         19 },
+	{ "Celtic",          39 },
+	{ "CentralEurRoman", 29 },
+	{ "ChineseSimp",     25 },
+	{ "ChineseTrad",      2 },
+	{ "Croatian",	     36 },
+	{ "Cyrillic",	      7 },
+	{ "Devanagari",       9 },
+	{ "Ethiopic",        28 },
+	{ "Farsi",          140 },
+	{ "Gaelic",          40 },
+	{ "Georgian",        23 },
+	{ "Greek",	          6 },
+	{ "Gujarati",        11 },
+	{ "Gurmukhi",        10 },
+	{ "Hebrew",	          5 },
+	{ "Icelandic",	     37 },
+	{ "Japanese",	      1 },
+	{ "Kannada",         16 },
+	{ "Khmer",           20 },
+	{ "Korean",	          3 },
+	{ "Laotian",         22 },
+	{ "Malayalam",       17 },
+	{ "Mongolian",       27 },
+	{ "Oriya",           12 },
+	{ "Roman",	          0 },	/* default */
+	{ "Romanian",	     38 },
+	{ "Sinhalese",       18 },
+	{ "Tamil",           14 },
+	{ "Telugu",          15 },
+	{ "Thai",	         21 },
+	{ "Tibetan",         26 },
+	{ "Turkish",	     35 },
+	{ "Ukrainian",      152 },
+	{ "Vietnamese",      30 },
 };
 
 
@@ -360,7 +299,7 @@ main(argc, argv)
 {
 	struct hfs_mount_args args;
 	int ch, mntflags;
-	char *dev, *dir;
+	char *dev, dir[MAXPATHLEN];
 	int mountStatus;
 	struct timeval dummy_timeval; /* gettimeofday() crashes if the first argument is NULL */
 	u_long localCreateTime;
@@ -383,8 +322,31 @@ main(argc, argv)
 
 
 	optind = optreset = 1;		/* Reset for parse of new argv. */
-	while ((ch = getopt(argc, argv, "xu:g:m:e:o:w")) != EOF)
+	while ((ch = getopt(argc, argv, "xu:g:m:e:o:wt:jc")) != EOF)
 		switch (ch) {
+		case 't': {
+			char *ptr;
+			args.journal_tbuffer_size = strtoul(optarg, &ptr, 0);
+			if (errno != 0) {
+				fprintf(stderr, "%s: Invalid tbuffer size %s\n", argv[0], optarg);
+				exit(5);
+			} else {
+				if (*ptr == 'k')
+					args.journal_tbuffer_size *= 1024;
+				else if (*ptr == 'm')
+					args.journal_tbuffer_size *= 1024*1024;
+			}
+			if (args.flags == VNOVAL) 
+				args.flags = HFSFSMNT_EXTENDED_ARGS;
+			break;
+		}
+		case 'j':
+			args.journal_disable = 1;
+			break;
+		case 'c':
+			// XXXdbg JOURNAL_NO_GROUP_COMMIT == 0x0001
+			args.journal_flags = 0x0001;
+			break;
 		case 'x':
 			if (args.flags == VNOVAL)
 				args.flags = 0;
@@ -445,7 +407,9 @@ main(argc, argv)
 	}
 
 	dev = argv[0];
-	dir = argv[1];
+
+	if (realpath(argv[1], dir) == NULL)
+		err(1, "realpath %s", dir);
 
 	args.fspec = dev;
 	args.export.ex_root = DEFAULT_ROOTUID;
@@ -473,9 +437,16 @@ main(argc, argv)
            	if (args.flags == VNOVAL)
             		args.flags = 0;
 
-		if (args.hfs_encoding == (u_long)VNOVAL) 
+		if ((args.hfs_encoding == (u_long)VNOVAL) && (encp == NULL)) {
 			args.hfs_encoding = 0;
 
+			/* Check if volume had a previous encoding preference. */
+			encp = get_encoding_pref(dev);
+			if (encp != NULL) {
+				load_encoding(encp);
+				args.hfs_encoding = encp->encoding_id;
+			}
+		}
 		/* when the mountpoint is root, use default values */
 		if (strcmp(dir, "/") == 0) {
 			sb.st_mode = 0777;
@@ -601,11 +572,21 @@ a_encoding(s)
 	char *uname;
 	int i;
 	u_long encoding;
-	struct hfs_mnt_encoding *enclist = hfs_mnt_encodinglist;
-	int maxencodingslots = sizeof(hfs_mnt_encodinglist) / sizeof(struct hfs_mnt_encoding);
+	struct hfs_mnt_encoding *p, *q, *enclist;
+	int elements = sizeof(hfs_mnt_encodinglist) / sizeof(struct hfs_mnt_encoding);
+	int compare;
 
-	for (i=0, enclist = hfs_mnt_encodinglist; i < maxencodingslots; i++, enclist++) {
-		if (strcmp(enclist->encoding_name, s) == 0)
+	/* Use a binary search to find an encoding match */
+	p = hfs_mnt_encodinglist;
+	q = p + (elements - 1);
+	while (p <= q) {
+		enclist = p + ((q - p) >> 1);	/* divide by 2 */
+		compare = strcmp(s, enclist->encoding_name);
+		if (compare < 0)
+			q = enclist - 1;
+		else if (compare > 0)
+			p = enclist + 1;
+		else
 			return (enclist);
 	}
 
@@ -614,7 +595,7 @@ a_encoding(s)
 	if (*s) goto unknown;
 
 	encoding = atoi(uname);
-	for (i=0, enclist = hfs_mnt_encodinglist; i < maxencodingslots; i++, enclist++) {
+	for (i=0, enclist = hfs_mnt_encodinglist; i < elements; i++, enclist++) {
 		if (enclist->encoding_id == encoding)
 			return (enclist);
 	}
@@ -624,10 +605,112 @@ unknown:
 	return (NULL);
 }
 
+
+/*
+ * Get file system's encoding preference.
+ */
+struct hfs_mnt_encoding *
+get_encoding_pref(char *dev)
+{
+	char buffer[HFS_BLOCK_SIZE];
+	struct hfs_mnt_encoding *enclist;
+	HFSMasterDirectoryBlock * mdbp;
+	int encoding = -1;
+	int elements;
+	int fd;
+	int i;
+
+	/* Can only load encoding modules if root. */
+	if (geteuid() != 0)
+		goto next;
+
+	fd = open(dev, O_RDONLY | O_NDELAY, 0);
+	if (fd == -1)
+		goto next;
+
+     	if (pread(fd, buffer, sizeof(buffer), 1024) != sizeof(buffer)) {
+     		close(fd);
+		goto next;
+	}
+	mdbp = (HFSMasterDirectoryBlock *) buffer;
+	if (SWAP_BE16(mdbp->drSigWord) == kHFSSigWord) {
+		encoding = GET_HFS_TEXT_ENCODING(SWAP_BE32(mdbp->drFndrInfo[4]));
+     	}
+	close(fd);
+next:
+	if (encoding == -1) {
+		encoding = get_encoding_bias();
+		if (encoding == 0 || encoding == -1)
+			encoding = get_default_encoding();
+	}
+
+	elements = sizeof(hfs_mnt_encodinglist) / sizeof(struct hfs_mnt_encoding);
+	for (i=0, enclist = hfs_mnt_encodinglist; i < elements; i++, enclist++) {
+		if (enclist->encoding_id == encoding)
+			return (enclist);
+	}
+
+	return (NULL);
+}
+
+/*
+ * Get kernel's encoding bias.
+ */
+int
+get_encoding_bias()
+{
+        int mib[3];
+        size_t buflen = sizeof(int);
+        struct vfsconf vfc;
+        int hint = 0;
+
+        if (getvfsbyname("hfs", &vfc) < 0)
+		goto error;
+
+        mib[0] = CTL_VFS;
+        mib[1] = vfc.vfc_typenum;
+        mib[2] = HFS_ENCODINGBIAS;
+ 
+	if (sysctl(mib, 3, &hint, &buflen, NULL, 0) < 0)
+ 		goto error;
+	return (hint);
+error:
+	return (-1);
+}
+
+#define __kCFUserEncodingFileName ("/.CFUserTextEncoding")
+
+unsigned int
+get_default_encoding()
+{
+	struct passwd *passwdp;
+
+	if ((passwdp = getpwuid(0))) {	/* root account */
+		char buffer[MAXPATHLEN + 1];
+		int fd;
+
+		strcpy(buffer, passwdp->pw_dir);
+		strcat(buffer, __kCFUserEncodingFileName);
+
+		if ((fd = open(buffer, O_RDONLY, 0)) > 0) {
+			size_t readSize;
+
+			readSize = read(fd, buffer, MAXPATHLEN);
+			buffer[(readSize < 0 ? 0 : readSize)] = '\0';
+			close(fd);
+			return strtol(buffer, NULL, 0);
+		}
+	}
+	return (0);	/* Fallback to smRoman */
+}
+
+
 void
 usage()
 {
 	(void)fprintf(stderr,
-               "usage: mount_hfs [-xw] [-u user] [-g group] [-m mask] [-e encoding] [-o options] special-device filesystem-node\n");
+               "usage: mount_hfs [-xw] [-u user] [-g group] [-m mask] [-e encoding] [-t tbuffer-size] [-j] [-c] [-o options] special-device filesystem-node\n");
+	(void)fprintf(stderr, "   -j disables journaling; -c disables group-commit for journaling\n");
+	
 	exit(1);
 }

@@ -1,23 +1,24 @@
 /*
- * Copyright (c) 1999-2002 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 1999-2003 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * "Portions Copyright (c) 1999-2002 Apple Computer, Inc.  All Rights
- * Reserved.  This file contains Original Code and/or Modifications of
- * Original Code as defined in and that are subject to the Apple Public
- * Source License Version 1.0 (the 'License').  You may not use this file
- * except in compliance with the License.  Please obtain a copy of the
- * License at http://www.apple.com/publicsource and read it before using
- * this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * 
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
  * 
  * The Original Code and all software distributed under the License are
  * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License."
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -30,26 +31,30 @@
 
 */
 
-#include <unistd.h>
-#include <err.h>
-#include <fcntl.h>
-
 #include <sys/param.h>
+#include <sys/types.h>
 #include <sys/time.h>
 #include <sys/errno.h>
-#include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/sysctl.h>
 
+#include <err.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <pwd.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 #include <CoreFoundation/CFString.h>
+#include <CoreFoundation/CFStringEncodingExt.h>
+
 extern Boolean _CFStringGetFileSystemRepresentation(CFStringRef string, UInt8 *buffer, CFIndex maxBufLen);
 
 
 #include <hfs/hfs_format.h>
+#include <hfs/hfs_mount.h>
 #include "hfs_endian.h"
 
 #include "newfs_hfs.h"
@@ -57,6 +62,11 @@ extern Boolean _CFStringGetFileSystemRepresentation(CFStringRef string, UInt8 *b
 
 
 #define HFS_BOOT_DATA	"/usr/share/misc/hfsbootdata"
+
+#define HFS_JOURNAL_FILE	".journal"
+#define HFS_JOURNAL_INFO	".journal_info_block"
+
+#define kJournalFileType	0x6a726e6c	/* 'jrnl' */
 
 
 typedef HFSMasterDirectoryBlock HFS_MDB;
@@ -88,8 +98,12 @@ static void InitExtentsRoot __P((UInt16 btNodeSize, HFSExtentDescriptor *bbextp,
 		void *buffer));
 
 static void WriteCatalogFile __P((const DriveInfo *dip, UInt32 startingSector,
-        const hfsparams_t *dp, void *buffer, UInt32 *bytesUsed, UInt32 *mapNodes));
-static void InitCatalogRoot_HFSPlus __P((const hfsparams_t *dp, void * buffer));
+        const hfsparams_t *dp, HFSPlusVolumeHeader *header, void *buffer,
+        UInt32 *bytesUsed, UInt32 *mapNodes));
+static void WriteJournalInfo(const DriveInfo *driveInfo, UInt32 startingSector,
+			     const hfsparams_t *dp, HFSPlusVolumeHeader *header,
+			     void *buffer);
+static void InitCatalogRoot_HFSPlus __P((const hfsparams_t *dp, const HFSPlusVolumeHeader *header, void * buffer));
 static void InitCatalogRoot_HFS __P((const hfsparams_t *dp, void * buffer));
 static void InitFirstCatalogLeaf __P((const hfsparams_t *dp, void * buffer,
 		int wrapper));
@@ -122,6 +136,8 @@ static UInt32 DivideAndRoundUp __P((UInt32 numerator, UInt32 denominator));
 static int ConvertUTF8toUnicode __P((const UInt8* source, UInt32 bufsize,
 		UniChar* unibuf, UInt16 *charcount));
 
+static int getencodinghint(char *name);
+
 
 void SETOFFSET (void *buffer, UInt16 btNodeSize, SInt16 recOffset, SInt16 vecOffset);
 #define SETOFFSET(buf,ndsiz,offset,rec)		\
@@ -130,6 +146,11 @@ void SETOFFSET (void *buffer, UInt16 btNodeSize, SInt16 recOffset, SInt16 vecOff
 #define BYTESTOBLKS(bytes,blks)		DivideAndRoundUp((bytes),(blks))
 
 #define ROUNDUP(x, u)	(((x) % (u) == 0) ? (x) : ((x)/(u) + 1) * (u))
+
+#define ENCODING_TO_BIT(e)                               \
+          ((e) < 48 ? (e) :                              \
+          ((e) == kCFStringEncodingMacUkrainian ? 48 :   \
+          ((e) == kCFStringEncodingMacFarsi ? 49 : 0)))
 
 /*
  * make_hfs
@@ -168,6 +189,8 @@ make_hfs(const DriveInfo *driveInfo,
 	nodeBuffer = malloc(8192);  /* max bitmap bytes is 8192 bytes */
 	if (nodeBuffer == NULL || mdbp == NULL) 
 		err(1, NULL);
+
+	defaults->encodingHint = getencodinghint(defaults->volumeName);
 
 	/* MDB Initialized in native byte order */
 	InitMDB(defaults, driveInfo->totalSectors, mdbp);
@@ -219,11 +242,10 @@ make_hfs(const DriveInfo *driveInfo,
 
 		(UInt16)mdbp->drFreeBks -= gDTDBFork.blockCount +
 				   	gReadMeFork.blockCount +
-				   	gSystemFork.blockCount +
-					defaults->hfsWrapperFreeBlks;
+				   	gSystemFork.blockCount;
 		mdbp->drEmbedExtent.startBlock = mdbp->drNmAlBlks - (UInt16)mdbp->drFreeBks;
 		mdbp->drEmbedExtent.blockCount = (UInt16)mdbp->drFreeBks;
-		(UInt16)mdbp->drFreeBks = defaults->hfsWrapperFreeBlks;
+		(UInt16)mdbp->drFreeBks = 0;
 	}
 
 
@@ -246,7 +268,7 @@ make_hfs(const DriveInfo *driveInfo,
 
 	/*--- WRITE CATALOG B*-TREE TO DISK:  */
 
-	WriteCatalogFile(driveInfo, sector, defaults, nodeBuffer, &bytesUsed, &mapNodes);
+	WriteCatalogFile(driveInfo, sector, defaults, NULL, nodeBuffer, &bytesUsed, &mapNodes);
 
 	if (mapNodes > 0)
 		WriteMapNodes(driveInfo, (sector + bytesUsed/kBytesPerSector),
@@ -300,6 +322,8 @@ make_hfsplus(const DriveInfo *driveInfo, hfsparams_t *defaults)
 	header = (HFSPlusVolumeHeader*)malloc((size_t)kBytesPerSector);
 	if (header == NULL)
 		err(1, NULL);
+
+	defaults->encodingHint = getencodinghint(defaults->volumeName);
 
 	/* VH Initialized in native byte order */
 	InitVH(defaults, driveInfo->totalSectors, header);
@@ -389,11 +413,17 @@ make_hfsplus(const DriveInfo *driveInfo, hfsparams_t *defaults)
 	sectorsPerNode = btNodeSize/kBytesPerSector;
 
 	sector = header->catalogFile.extents[0].startBlock * sectorsPerBlock;
-	WriteCatalogFile(driveInfo, sector, defaults, nodeBuffer, &bytesUsed, &mapNodes);
+	WriteCatalogFile(driveInfo, sector, defaults, header, nodeBuffer, &bytesUsed, &mapNodes);
 
 	if (mapNodes > 0)
 		WriteMapNodes(driveInfo, (sector + bytesUsed/kBytesPerSector),
 			bytesUsed/btNodeSize, mapNodes, btNodeSize, nodeBuffer);
+
+	/*--- JOURNALING SETUP */
+	if (defaults->journaledHFS) {
+	    sector = header->journalInfoBlock * sectorsPerBlock;
+	    WriteJournalInfo(driveInfo, sector, defaults, header, nodeBuffer);
+	}
 
 
 	/*--- WRITE VOLUME HEADER TO DISK:  */
@@ -499,12 +529,13 @@ InitMDB(hfsparams_t *defaults, UInt32 driveBlocks, HFS_MDB *mdbp)
 		/* Find out what Mac encoding to use: */
 		maxchars = MIN(sizeof(unibuf)/sizeof(UniChar), CFStringGetLength(cfstr));
 		CFStringGetCharacters(cfstr, CFRangeMake(0, maxchars), unibuf);
-		cfOK = CFStringGetPascalString(cfstr, mdbp->drVN, sizeof(mdbp->drVN), GetDefaultEncoding());
+		cfOK = CFStringGetPascalString(cfstr, mdbp->drVN, sizeof(mdbp->drVN), defaults->encodingHint);
 		CFRelease(cfstr);
 
 		if (!cfOK) {
 			mdbp->drVN[0] = strlen(kDefaultVolumeNameStr);
 			bcopy(kDefaultVolumeNameStr, &mdbp->drVN[1], mdbp->drVN[0]);
+			defaults->encodingHint = 0;
 			warnx("invalid HFS name: \"%s\", using \"%s\" instead",
 			      defaults->volumeName, kDefaultVolumeNameStr);
 		}
@@ -512,7 +543,9 @@ InitMDB(hfsparams_t *defaults, UInt32 driveBlocks, HFS_MDB *mdbp)
 		bcopy(&mdbp->drVN[1], defaults->volumeName, mdbp->drVN[0]);
 		defaults->volumeName[mdbp->drVN[0]] = '\0';
 	}
-	
+	/* Save the encoding hint in the Finder Info (field 4). */
+	mdbp->drFndrInfo[4] = SET_HFS_TEXT_ENCODING(defaults->encodingHint);
+
 	mdbp->drWrCnt = kWriteSeqNum;
 
 	mdbp->drXTFlSize = mdbp->drXTClpSiz = defaults->extentsClumpSize;
@@ -574,6 +607,7 @@ InitVH(hfsparams_t *defaults, UInt64 sectors, HFSPlusVolumeHeader *hp)
 	UInt32	bitmapBlocks;
 	UInt16	burnedBlocksBeforeVH = 0;
 	UInt16	burnedBlocksAfterAltVH = 0;
+	UInt32  nextBlock;
 	
 	bzero(hp, kBytesPerSector);
 
@@ -596,10 +630,15 @@ InitVH(hfsparams_t *defaults, UInt64 sectors, HFSPlusVolumeHeader *hp)
 	/* note: add 2 for the Alternate VH, and VH */
 	blocksUsed = 2 + burnedBlocksBeforeVH + burnedBlocksAfterAltVH + bitmapBlocks;
 
-	hp->signature = kHFSPlusSigWord;
-	hp->version = kHFSPlusVersion;
+	if (defaults->flags & kMakeCaseSensitive) {
+		hp->signature = kHFSXSigWord;
+		hp->version = kHFSXVersion;
+	} else {
+		hp->signature = kHFSPlusSigWord;
+		hp->version = kHFSPlusVersion;
+	}
 	hp->attributes = kHFSVolumeUnmountedMask;
-	hp->lastMountedVersion = FOUR_CHAR_CODE('10.0');
+	hp->lastMountedVersion = kHFSPlusMountVersion;
 
 	/* NOTE: create date is in local time, not GMT!  */
 	hp->createDate = UTCToLocal(defaults->createDate);
@@ -617,7 +656,7 @@ InitVH(hfsparams_t *defaults, UInt64 sectors, HFSPlusVolumeHeader *hp)
 	hp->rsrcClumpSize = defaults->rsrcClumpSize;
 	hp->dataClumpSize = defaults->dataClumpSize;
 	hp->nextCatalogID = defaults->nextFreeFileID;
-	hp->encodingsBitmap = 1;	/* just set to MacRoman */
+	hp->encodingsBitmap = 1 | (1 << ENCODING_TO_BIT(defaults->encodingHint));
 
 	/* set up allocation bitmap file */
 	hp->allocationFile.clumpSize = defaults->allocationClumpSize;
@@ -626,14 +665,31 @@ InitVH(hfsparams_t *defaults, UInt64 sectors, HFSPlusVolumeHeader *hp)
   	hp->allocationFile.extents[0].startBlock = 1 + burnedBlocksBeforeVH;
 	hp->allocationFile.extents[0].blockCount = bitmapBlocks;
 	
+	/* set up journal files */
+	if (defaults->journaledHFS) {
+		hp->fileCount           = 2;
+		hp->attributes         |= kHFSVolumeJournaledMask;
+		hp->nextCatalogID      += 2;
+
+		/*
+		 * Allocate 1 block for the journalInfoBlock the
+		 * journal file size is pass in hfsparams_t
+		 */
+	    hp->journalInfoBlock = hp->allocationFile.extents[0].startBlock +
+				   hp->allocationFile.extents[0].blockCount;
+	    blocksUsed += 1 + ((defaults->journalSize) / blockSize);
+	    nextBlock = hp->journalInfoBlock + 1 + (defaults->journalSize / blockSize);
+	} else {
+	    hp->journalInfoBlock = 0;
+	    nextBlock = hp->allocationFile.extents[0].startBlock +
+			hp->allocationFile.extents[0].blockCount;
+	}
 
 	/* set up extents b-tree file */
 	hp->extentsFile.clumpSize = defaults->extentsClumpSize;
 	hp->extentsFile.logicalSize = defaults->extentsClumpSize;
 	hp->extentsFile.totalBlocks = defaults->extentsClumpSize / blockSize;
-	hp->extentsFile.extents[0].startBlock =
-		hp->allocationFile.extents[0].startBlock +
-		hp->allocationFile.extents[0].blockCount;
+	hp->extentsFile.extents[0].startBlock = nextBlock;
 	hp->extentsFile.extents[0].blockCount = hp->extentsFile.totalBlocks;
 	blocksUsed += hp->extentsFile.totalBlocks;
 
@@ -744,21 +800,21 @@ WriteExtentsFile(const DriveInfo *driveInfo, UInt32 startingSector,
 	bthp->freeNodes		= SWAP_BE32 (SWAP_BE32 (bthp->totalNodes) - 1);  /* header */
 	bthp->clumpSize		= SWAP_BE32 (fileSize);
 
-	if (dp->signature == kHFSPlusSigWord) {
-		bthp->attributes	|= SWAP_BE32 (kBTBigKeysMask);
-		bthp->maxKeyLength	=  SWAP_BE16 (kHFSPlusExtentKeyMaximumLength);
-	} else {
-		bthp->maxKeyLength	= SWAP_BE16 (kHFSExtentKeyMaximumLength);
+	if (dp->flags & kMakeStandardHFS) {
+		bthp->maxKeyLength = SWAP_BE16 (kHFSExtentKeyMaximumLength);
 
 		/* wrapper has a bad-block extent record */
 		if (wrapper) {
-			bthp->treeDepth		= SWAP_BE16 (SWAP_BE16 (bthp->treeDepth) + 1);
-			bthp->leafRecords	= SWAP_BE32 (SWAP_BE32 (bthp->leafRecords) + 1);
-			bthp->rootNode		= SWAP_BE32 (1);
-			bthp->firstLeafNode	= SWAP_BE32 (1);
-			bthp->lastLeafNode	= SWAP_BE32 (1);
-			bthp->freeNodes		= SWAP_BE32 (SWAP_BE32 (bthp->freeNodes) - 1);
+			bthp->treeDepth     = SWAP_BE16 (SWAP_BE16 (bthp->treeDepth) + 1);
+			bthp->leafRecords   = SWAP_BE32 (SWAP_BE32 (bthp->leafRecords) + 1);
+			bthp->rootNode      = SWAP_BE32 (1);
+			bthp->firstLeafNode = SWAP_BE32 (1);
+			bthp->lastLeafNode  = SWAP_BE32 (1);
+			bthp->freeNodes     = SWAP_BE32 (SWAP_BE32 (bthp->freeNodes) - 1);
 		}
+	} else {
+		bthp->attributes |= SWAP_BE32 (kBTBigKeysMask);
+		bthp->maxKeyLength = SWAP_BE16 (kHFSPlusExtentKeyMaximumLength);
 	}
 	offset += sizeof(BTHeaderRec);
 
@@ -853,6 +909,32 @@ InitExtentsRoot(UInt16 btNodeSize, HFSExtentDescriptor *bbextp, void *buffer)
 	SETOFFSET(buffer, btNodeSize, offset, 2);
 }
 
+static void
+WriteJournalInfo(const DriveInfo *driveInfo, UInt32 startingSector,
+		 const hfsparams_t *dp, HFSPlusVolumeHeader *header,
+		 void *buffer)
+{
+    JournalInfoBlock *jibp = buffer;
+    
+    memset(buffer, 0xdb, header->blockSize);
+    memset(jibp, 0, sizeof(JournalInfoBlock));
+    
+    jibp->flags   = kJIJournalInFSMask;
+    jibp->flags  |= kJIJournalNeedInitMask;
+    jibp->offset  = (header->journalInfoBlock + 1) * header->blockSize;
+    jibp->size    = dp->journalSize;
+
+    jibp->flags  = SWAP_BE32(jibp->flags);
+    jibp->offset = SWAP_BE64(jibp->offset);
+    jibp->size   = SWAP_BE64(jibp->size);
+    
+    WriteBuffer(driveInfo, startingSector, header->blockSize, buffer);
+
+    jibp->flags  = SWAP_BE32(jibp->flags);
+    jibp->offset = SWAP_BE64(jibp->offset);
+    jibp->size   = SWAP_BE64(jibp->size);
+}
+
 
 /*
  * WriteCatalogFile
@@ -864,8 +946,8 @@ InitExtentsRoot(UInt16 btNodeSize, HFSExtentDescriptor *bbextp, void *buffer)
  */
 static void
 WriteCatalogFile(const DriveInfo *driveInfo, UInt32 startingSector,
-        const hfsparams_t *dp, void *buffer, UInt32 *bytesUsed,
-        UInt32 *mapNodes)
+        const hfsparams_t *dp, HFSPlusVolumeHeader *header, void *buffer,
+        UInt32 *bytesUsed, UInt32 *mapNodes)
 {
 	BTNodeDescriptor	*ndp;
 	BTHeaderRec		*bthp;
@@ -899,16 +981,13 @@ WriteCatalogFile(const DriveInfo *driveInfo, UInt32 startingSector,
 	bthp->rootNode		= SWAP_BE32 (1);
 	bthp->firstLeafNode	= SWAP_BE32 (1);
 	bthp->lastLeafNode	= SWAP_BE32 (1);
-	bthp->leafRecords	= SWAP_BE32 (2);
+	bthp->leafRecords	= SWAP_BE32 (dp->journaledHFS ? 6 : 2);
 	bthp->nodeSize		= SWAP_BE16 (nodeSize);
 	bthp->totalNodes	= SWAP_BE32 (fileSize / nodeSize);
 	bthp->freeNodes		= SWAP_BE32 (SWAP_BE32 (bthp->totalNodes) - 2);  /* header and root */
 	bthp->clumpSize		= SWAP_BE32 (fileSize);
 
-	if (dp->signature == kHFSPlusSigWord) {
-		bthp->attributes	|= SWAP_BE32 (kBTVariableIndexKeysMask + kBTBigKeysMask);
-		bthp->maxKeyLength	=  SWAP_BE16 (kHFSPlusCatalogKeyMaximumLength);
-	} else {
+	if (dp->flags & kMakeStandardHFS) {
 		bthp->maxKeyLength	=  SWAP_BE16 (kHFSCatalogKeyMaximumLength);
 
 		if (dp->flags & kMakeHFSWrapper) {
@@ -918,6 +997,13 @@ WriteCatalogFile(const DriveInfo *driveInfo, UInt32 startingSector,
 			bthp->lastLeafNode	= SWAP_BE32 (SWAP_BE32 (bthp->firstLeafNode) + 1);
 			bthp->freeNodes		= SWAP_BE32 (SWAP_BE32 (bthp->freeNodes) - 2);  /* tree now split with 2 leaf nodes */
 		}
+	} else /* HFS+ */ {
+		bthp->attributes	|= SWAP_BE32 (kBTVariableIndexKeysMask + kBTBigKeysMask);
+		bthp->maxKeyLength	=  SWAP_BE16 (kHFSPlusCatalogKeyMaximumLength);
+		if (dp->flags & kMakeCaseSensitive)
+			bthp->keyCompareType = kHFSBinaryCompare;
+		else
+			bthp->keyCompareType = kHFSCaseFolding;
 	}
 	offset += sizeof(BTHeaderRec);
 
@@ -961,8 +1047,8 @@ WriteCatalogFile(const DriveInfo *driveInfo, UInt32 startingSector,
 
 	SETOFFSET(buffer, nodeSize, offset, 4);
 
-	if (dp->signature == kHFSPlusSigWord) {
-		InitCatalogRoot_HFSPlus(dp, buffer + nodeSize);
+	if ((dp->flags & kMakeStandardHFS) == 0) {
+		InitCatalogRoot_HFSPlus(dp, header, buffer + nodeSize);
 
 	} else if (wrapper) {
 		InitCatalogRoot_HFS  (dp, buffer + (1 * nodeSize));
@@ -980,12 +1066,13 @@ WriteCatalogFile(const DriveInfo *driveInfo, UInt32 startingSector,
 
 
 static void
-InitCatalogRoot_HFSPlus(const hfsparams_t *dp, void * buffer)
+InitCatalogRoot_HFSPlus(const hfsparams_t *dp, const HFSPlusVolumeHeader *header, void * buffer)
 {
 	BTNodeDescriptor		*ndp;
 	HFSPlusCatalogKey		*ckp;
 	HFSPlusCatalogKey		*tkp;
 	HFSPlusCatalogFolder	*cdp;
+	HFSPlusCatalogFile		*cfp;
 	HFSPlusCatalogThread	*ctp;
 	UInt16					nodeSize;
 	SInt16					offset;
@@ -993,6 +1080,7 @@ InitCatalogRoot_HFSPlus(const hfsparams_t *dp, void * buffer)
 	UInt8 canonicalName[256];
 	CFStringRef cfstr;
 	Boolean	cfOK;
+	int index = 0;
 
 	nodeSize = dp->catalogNodeSize;
 	bzero(buffer, nodeSize);
@@ -1001,12 +1089,11 @@ InitCatalogRoot_HFSPlus(const hfsparams_t *dp, void * buffer)
 	 * All nodes have a node descriptor...
 	 */
 	ndp = (BTNodeDescriptor *)buffer;
-	ndp->kind			= kBTLeafNode;
-	ndp->numRecords		= SWAP_BE16 (2);
-	ndp->height			= 1;
+	ndp->kind   = kBTLeafNode;
+	ndp->height = 1;
+	ndp->numRecords = SWAP_BE16 (dp->journaledHFS ? 6 : 2);
 	offset = sizeof(BTNodeDescriptor);
-
-	SETOFFSET(buffer, nodeSize, offset, 1);
+	SETOFFSET(buffer, nodeSize, offset, ++index);
 
 	/*
 	 * First record is always the root directory...
@@ -1039,13 +1126,18 @@ InitCatalogRoot_HFSPlus(const hfsparams_t *dp, void * buffer)
 
 	cdp = (HFSPlusCatalogFolder *)((UInt8 *)buffer + offset);
 	cdp->recordType		= SWAP_BE16 (kHFSPlusFolderRecord);
+	cdp->valence        = SWAP_BE32 (dp->journaledHFS ? 2 : 0);
 	cdp->folderID		= SWAP_BE32 (kHFSRootFolderID);
 	cdp->createDate		= SWAP_BE32 (dp->createDate);
 	cdp->contentModDate	= SWAP_BE32 (dp->createDate);
-	cdp->textEncoding	= SWAP_BE32 (GetDefaultEncoding());
+	cdp->textEncoding	= SWAP_BE32 (dp->encodingHint);
+	if (dp->flags & kUseAccessPerms) {
+		cdp->bsdInfo.ownerID  = SWAP_BE32 (dp->owner);
+		cdp->bsdInfo.groupID  = SWAP_BE32 (dp->group);
+		cdp->bsdInfo.fileMode = SWAP_BE16 (dp->mask | S_IFDIR);
+	}
 	offset += sizeof(HFSPlusCatalogFolder);
-
-	SETOFFSET(buffer, nodeSize, offset, 2);
+	SETOFFSET(buffer, nodeSize, offset, ++index);
 
 	/*
 	 * Second record is always the root directory thread...
@@ -1064,7 +1156,111 @@ InitCatalogRoot_HFSPlus(const hfsparams_t *dp, void * buffer)
 	offset += (sizeof(HFSPlusCatalogThread)
 			- (sizeof(ctp->nodeName.unicode) - unicodeBytes) );
 
-	SETOFFSET(buffer, nodeSize, offset, 3);
+	SETOFFSET(buffer, nodeSize, offset, ++index);
+	
+	/*
+	 * Add records for ".journal" and ".journal_info_block" files:
+	 */
+	if (dp->journaledHFS) {
+		struct HFSUniStr255 *nodename1, *nodename2;
+		int uBytes1, uBytes2;
+
+		/* File record #1 */
+		ckp = (HFSPlusCatalogKey *)((UInt8 *)buffer + offset);
+		(void) ConvertUTF8toUnicode(HFS_JOURNAL_FILE, sizeof(ckp->nodeName.unicode),
+		                            ckp->nodeName.unicode, &ckp->nodeName.length);
+		ckp->nodeName.length = SWAP_BE16 (ckp->nodeName.length);
+		uBytes1 = sizeof(UniChar) * SWAP_BE16 (ckp->nodeName.length);
+		ckp->keyLength = SWAP_BE16 (kHFSPlusCatalogKeyMinimumLength + uBytes1);
+		ckp->parentID  = SWAP_BE32 (kHFSRootFolderID);
+		offset += SWAP_BE16 (ckp->keyLength) + 2;
+	
+		cfp = (HFSPlusCatalogFile *)((UInt8 *)buffer + offset);
+		cfp->recordType     = SWAP_BE16 (kHFSPlusFileRecord);
+		cfp->flags          = SWAP_BE16 (kHFSThreadExistsMask);
+		cfp->fileID         = SWAP_BE32 (dp->nextFreeFileID);
+		cfp->createDate     = SWAP_BE32 (dp->createDate + 1);
+		cfp->contentModDate = SWAP_BE32 (dp->createDate + 1);
+		cfp->textEncoding   = 0;
+
+		cfp->bsdInfo.fileMode     = SWAP_BE16 (S_IFREG);
+		cfp->bsdInfo.ownerFlags   = SWAP_BE16 (UF_NODUMP);
+		cfp->userInfo.fdType	  = SWAP_BE32 (kJournalFileType);
+		cfp->userInfo.fdCreator	  = SWAP_BE32 (kHFSPlusCreator);
+		cfp->userInfo.fdFlags     = SWAP_BE16 (kIsInvisible + kNameLocked);
+		cfp->dataFork.logicalSize = SWAP_BE64 (dp->journalSize);
+		cfp->dataFork.totalBlocks = SWAP_BE32 (dp->journalSize / dp->blockSize);
+
+		cfp->dataFork.extents[0].startBlock = SWAP_BE32 (header->journalInfoBlock + 1);
+		cfp->dataFork.extents[0].blockCount = cfp->dataFork.totalBlocks;
+
+		offset += sizeof(HFSPlusCatalogFile);
+		SETOFFSET(buffer, nodeSize, offset, ++index);
+		nodename1 = &ckp->nodeName;
+
+		/* File record #2 */
+		ckp = (HFSPlusCatalogKey *)((UInt8 *)buffer + offset);
+		(void) ConvertUTF8toUnicode(HFS_JOURNAL_INFO, sizeof(ckp->nodeName.unicode),
+		                            ckp->nodeName.unicode, &ckp->nodeName.length);
+		ckp->nodeName.length = SWAP_BE16 (ckp->nodeName.length);
+		uBytes2 = sizeof(UniChar) * SWAP_BE16 (ckp->nodeName.length);
+		ckp->keyLength = SWAP_BE16 (kHFSPlusCatalogKeyMinimumLength + uBytes2);
+		ckp->parentID  = SWAP_BE32 (kHFSRootFolderID);
+		offset += SWAP_BE16 (ckp->keyLength) + 2;
+	
+		cfp = (HFSPlusCatalogFile *)((UInt8 *)buffer + offset);
+		cfp->recordType     = SWAP_BE16 (kHFSPlusFileRecord);
+		cfp->flags          = SWAP_BE16 (kHFSThreadExistsMask);
+		cfp->fileID         = SWAP_BE32 (dp->nextFreeFileID + 1);
+		cfp->createDate     = SWAP_BE32 (dp->createDate);
+		cfp->contentModDate = SWAP_BE32 (dp->createDate);
+		cfp->textEncoding   = 0;
+
+		cfp->bsdInfo.fileMode     = SWAP_BE16 (S_IFREG);
+		cfp->bsdInfo.ownerFlags   = SWAP_BE16 (UF_NODUMP);
+		cfp->userInfo.fdType	  = SWAP_BE32 (kJournalFileType);
+		cfp->userInfo.fdCreator	  = SWAP_BE32 (kHFSPlusCreator);
+		cfp->userInfo.fdFlags     = SWAP_BE16 (kIsInvisible + kNameLocked);
+		cfp->dataFork.logicalSize = SWAP_BE64(dp->blockSize);;
+		cfp->dataFork.totalBlocks = SWAP_BE32(1);
+
+		cfp->dataFork.extents[0].startBlock = SWAP_BE32 (header->journalInfoBlock);
+		cfp->dataFork.extents[0].blockCount = cfp->dataFork.totalBlocks;
+
+		offset += sizeof(HFSPlusCatalogFile);
+		SETOFFSET(buffer, nodeSize, offset, ++index);
+		nodename2 = &ckp->nodeName;
+
+		/* Thread record for file #1 */
+		tkp = (HFSPlusCatalogKey *)((UInt8 *)buffer + offset);
+		tkp->keyLength = SWAP_BE16 (kHFSPlusCatalogKeyMinimumLength);
+		tkp->parentID  = SWAP_BE32 (dp->nextFreeFileID);
+		tkp->nodeName.length = 0;
+		offset += SWAP_BE16 (tkp->keyLength) + 2;
+	
+		ctp = (HFSPlusCatalogThread *)((UInt8 *)buffer + offset);
+		ctp->recordType = SWAP_BE16 (kHFSPlusFileThreadRecord);
+		ctp->parentID   = SWAP_BE32 (kHFSRootFolderID);
+		bcopy(nodename1, &ctp->nodeName, sizeof(UInt16) + uBytes1);
+		offset += (sizeof(HFSPlusCatalogThread)
+				- (sizeof(ctp->nodeName.unicode) - uBytes1) );
+		SETOFFSET(buffer, nodeSize, offset, ++index);
+
+		/* Thread record for file #2 */
+		tkp = (HFSPlusCatalogKey *)((UInt8 *)buffer + offset);
+		tkp->keyLength = SWAP_BE16 (kHFSPlusCatalogKeyMinimumLength);
+		tkp->parentID  = SWAP_BE32 (dp->nextFreeFileID + 1);
+		tkp->nodeName.length = 0;
+		offset += SWAP_BE16 (tkp->keyLength) + 2;
+	
+		ctp = (HFSPlusCatalogThread *)((UInt8 *)buffer + offset);
+		ctp->recordType = SWAP_BE16 (kHFSPlusFileThreadRecord);
+		ctp->parentID   = SWAP_BE32 (kHFSRootFolderID);
+		bcopy(nodename2, &ctp->nodeName, sizeof(UInt16) + uBytes2);
+		offset += (sizeof(HFSPlusCatalogThread)
+				- (sizeof(ctp->nodeName.unicode) - uBytes2) );
+		SETOFFSET(buffer, nodeSize, offset, ++index);
+	}
 }
 
 
@@ -1254,7 +1450,6 @@ InitSecondCatalogLeaf(const hfsparams_t *dp, void * buffer)
 	cfp->recordType			= SWAP_BE16 (kHFSFileRecord);
 	cfp->userInfo.fdType	= SWAP_BE32 (kReadMe_Type);
 	cfp->userInfo.fdCreator	= SWAP_BE32 (kReadMe_Creator);
-	cfp->userInfo.fdFlags	= SWAP_BE16 (kIsInvisible);
 	cfp->fileID				= SWAP_BE32 (kReadMe_FileID);
 	cfp->createDate			= SWAP_BE32 (timeStamp);
 	cfp->modifyDate			= SWAP_BE32 (timeStamp);
@@ -1781,3 +1976,30 @@ ConvertUTF8toUnicode(const UInt8* source, UInt32 bufsize, UniChar* unibuf,
 
 	return (0);
 }
+
+/*
+ * Derive the encoding hint for the given name.
+ */
+static int
+getencodinghint(char *name)
+{
+        int mib[3];
+        size_t buflen = sizeof(int);
+        struct vfsconf vfc;
+        int hint = 0;
+
+        if (getvfsbyname("hfs", &vfc) < 0)
+		goto error;
+
+        mib[0] = CTL_VFS;
+        mib[1] = vfc.vfc_typenum;
+        mib[2] = HFS_ENCODINGHINT;
+ 
+	if (sysctl(mib, 3, &hint, &buflen, name, strlen(name) + 1) < 0)
+ 		goto error;
+	return (hint);
+error:
+	hint = GetDefaultEncoding();
+	return (hint);
+}
+

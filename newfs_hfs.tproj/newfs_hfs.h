@@ -1,23 +1,24 @@
 /*
- * Copyright (c) 1999-2002 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 1999-2003 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * "Portions Copyright (c) 1999-2002 Apple Computer, Inc.  All Rights
- * Reserved.  This file contains Original Code and/or Modifications of
- * Original Code as defined in and that are subject to the Apple Public
- * Source License Version 1.0 (the 'License').  You may not use this file
- * except in compliance with the License.  Please obtain a copy of the
- * License at http://www.apple.com/publicsource and read it before using
- * this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * 
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
  * 
  * The Original Code and all software distributed under the License are
  * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License."
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -64,7 +65,7 @@ typedef struct DXInfo DXInfo;
 
 
 enum {
-	kMinHFSPlusVolumeSize	= (4*1024*1024),
+	kMinHFSPlusVolumeSize	= (512 * 1024),
 	
 	kBytesPerSector		= 512,
 	kBitsPerSector		= 4096,
@@ -153,11 +154,6 @@ enum {
 #define kSystem_Creator	'MACS'
 
 
-/*
- * The minimum HFS Plus volume is 32 MB
- */
-#define	MINHFSPLUSSIZEMB	4
-
 
 #if !defined(FALSE) && !defined(TRUE)
 enum {
@@ -190,14 +186,16 @@ typedef struct DriveInfo DriveInfo;
 
 
 enum {
-	kMakeHFSWrapper = 1,
-	kMakeMaxHFSBitmap = 2
+	kMakeHFSWrapper    = 0x01,
+	kMakeMaxHFSBitmap  = 0x02,
+	kMakeStandardHFS   = 0x04,
+	kMakeCaseSensitive = 0x08,
+	kUseAccessPerms    = 0x10,
 };
 
 
 struct hfsparams {
-	UInt16 		signature;
-	UInt16 		flags;			/* kMakeHFSWrapper */
+	UInt32 		flags;			/* kMakeHFSWrapper, ... */
 	UInt32 		blockSize;
 	UInt32 		rsrcClumpSize;
 	UInt32 		dataClumpSize;
@@ -211,8 +209,14 @@ struct hfsparams {
 	UInt32 		allocationClumpSize;
 	UInt32          createDate;             /* in UTC */
 	UInt32		hfsAlignment;
-	UInt32		hfsWrapperFreeBlks;
-	UInt8		volumeName[64];		/* in UTF-8 */
+	UInt8		volumeName[kHFSPlusMaxFileNameChars + 1];  /* in UTF-8 */
+	UInt32		encodingHint;
+	UInt32 		journaledHFS;
+	UInt32 		journalSize;
+	UInt8		*journalDevice;
+	uid_t		owner;
+	gid_t		group;
+	mode_t		mask;
 };
 typedef struct hfsparams hfsparams_t;
 

@@ -3,21 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * "Portions Copyright (c) 2000 Apple Computer, Inc.  All Rights
- * Reserved.  This file contains Original Code and/or Modifications of
- * Original Code as defined in and that are subject to the Apple Public
- * Source License Version 1.1 (the 'License').  You may not use this file
- * except in compliance with the License.  Please obtain a copy of the
- * License at http://www.apple.com/publicsource and read it before using
- * this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * 
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
  * 
  * The Original Code and all software distributed under the License are
  * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License."
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -80,7 +81,7 @@ checkfilesys(fname)
 	int tryErrorAgain = 2;
 	int tryOthersAgain = 3;
 
-	rdonly = alwaysno;
+	rdonly = alwaysno || quick;
 	if (!preen)
 		printf("** %s", fname);
 
@@ -104,20 +105,34 @@ checkfilesys(fname)
 		close(dosfs);
 		return 8;
 	}
-
-       if (quick) {
-               if (isdirty(dosfs, &boot, boot.ValidFat >= 0 ? boot.ValidFat : 0)) {
-                       pwarn("FILESYSTEM DIRTY; SKIPPING CHECKS\n");
-                       ret = FSDIRTY;
-               }
-               else {
-                       pwarn("FILESYSTEM CLEAN; SKIPPING CHECKS\n");
-                       ret = 0;
-               }
-
-               close(dosfs);
-               return ret;
-       }
+	
+	if (quick) {
+		/*
+		 * FAT12 volumes don't have a dirty bit.  If we were asked for
+		 * a quick check, then actually do a full scan without repairs.
+		 */
+		if (boot.ClustMask == CLUST12_MASK) {
+			/* Don't attempt to do any repairs */
+			rdonly = 1;
+			alwaysno = 1;
+			alwaysyes = 0;
+			quiet = 1;
+			
+			/* Go verify the volume */
+			goto Again;
+		}
+		else if (isdirty(dosfs, &boot, boot.ValidFat >= 0 ? boot.ValidFat : 0)) {
+			pwarn("FILESYSTEM DIRTY; SKIPPING CHECKS\n");
+			ret = FSDIRTY;
+		}
+		else {
+			pwarn("FILESYSTEM CLEAN; SKIPPING CHECKS\n");
+			ret = 0;
+		}
+		
+		close(dosfs);
+		return ret;
+	}
 
 Again:
 	mod = 0;		/* make sure its reset */
@@ -133,7 +148,7 @@ Again:
 	 * different values.  Besides, the filesystem itself only ever
 	 * uses FAT #0.
 	 */
-	if (!preen) {
+	if (!preen && !quiet) {
 		printf("** Phase 1 - Read FAT\n");
         }
         
@@ -143,7 +158,7 @@ Again:
 		return 8;
 	}
 
-	if (!preen)
+	if (!preen && !quiet)
 		printf("** Phase 2 - Check Cluster Chains\n");
 
 	mod |= checkfat(&boot, fat);
@@ -151,7 +166,7 @@ Again:
 		goto out;
 	/* delay writing FATs */
 
-	if (!preen)
+	if (!preen && !quiet)
 		printf("** Phase 3 - Checking Directories\n");
 
 	mod |= resetDosDirSection(&boot, fat);
@@ -164,7 +179,7 @@ Again:
 	if (mod & FSFATAL)
 		goto out;
 
-	if (!preen)
+	if (!preen && !quiet)
 		printf("** Phase 4 - Checking for Lost Files\n");
 
 	mod |= checklost(dosfs, &boot, fat);
@@ -181,15 +196,26 @@ Again:
 			mod |= FSERROR;
 	}
 
+	if (quick) {
+		if (mod) {
+			printf("FILESYSTEM DIRTY\n");
+			ret = FSDIRTY;
+		}
+		else {
+			printf("FILESYSTEM CLEAN\n");
+			ret = 0;
+		}
+	}
+
 	if (boot.NumBad)
 		pwarn("%d files, %d free (%d clusters), %d bad (%d clusters)\n",
-		      boot.NumFiles,
-		      boot.NumFree * boot.ClusterSize / 1024, boot.NumFree,
-		      boot.NumBad * boot.ClusterSize / 1024, boot.NumBad);
+			  boot.NumFiles,
+			  boot.NumFree * boot.ClusterSize / 1024, boot.NumFree,
+			  boot.NumBad * boot.ClusterSize / 1024, boot.NumBad);
 	else
 		pwarn("%d files, %d free (%d clusters)\n",
-		      boot.NumFiles,
-		      boot.NumFree * boot.ClusterSize / 1024, boot.NumFree);
+			  boot.NumFiles,
+			  boot.NumFree * boot.ClusterSize / 1024, boot.NumFree);
 
 	if (mod && (mod & FSERROR) == 0) {
 		if (mod & FSDIRTY) {
@@ -205,6 +231,10 @@ Again:
 			}
 		}
 	}
+
+	/* Don't bother trying multiple times if we're not doing repairs */
+	if (mod && rdonly)
+		goto out;
 
 	if ((mod & FSFATAL) && (--tryFatalAgain > 0))
 		goto Again;

@@ -3,21 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * "Portions Copyright (c) 1999 Apple Computer, Inc.  All Rights
- * Reserved.  This file contains Original Code and/or Modifications of
- * Original Code as defined in and that are subject to the Apple Public
- * Source License Version 1.0 (the 'License').  You may not use this file
- * except in compliance with the License.  Please obtain a copy of the
- * License at http://www.apple.com/publicsource and read it before using
- * this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * 
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
  * 
  * The Original Code and all software distributed under the License are
  * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License."
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -120,6 +121,7 @@ void do_delete_partition(partition_map_header *map);
 void do_display_block(partition_map_header *map);
 int do_expert(partition_map_header *map);
 void do_reorder(partition_map_header *map);
+void do_rename_partition(partition_map_header *map, int editing_type);
 void do_write_partition_map(partition_map_header *map);
 void edit(char *name, int ask_logical_size);
 int get_base_argument(long *number, partition_map_header *map);
@@ -179,7 +181,7 @@ main(int argc, char **argv)
     }
 }
 #else
-void
+int
 main(int argc, char * argv[])
 {
     if (sizeof(DPME) != PBLOCK_SIZE) {
@@ -195,7 +197,7 @@ main(int argc, char * argv[])
     if (argc > 1) {
 	init_program_name(argv);
 	interactive = 0;
-	exit(do_command_line(argc - 1, argv + 1));
+	return do_command_line(argc - 1, argv + 1);
     }
 	
     interactive = 1;
@@ -205,7 +207,7 @@ main(int argc, char * argv[])
     interact();
 
     printf("The end\n");
-    exit(0);
+    return 0;
 }
 #endif
 
@@ -419,6 +421,7 @@ edit(char *name, int ask_logical_size)
 #endif
     int order;
     int get_type;
+    int change_type;
     int valid_file;
 
     map = open_partition_map(name, &valid_file, ask_logical_size);
@@ -432,6 +435,7 @@ edit(char *name, int ask_logical_size)
 	first = 0;
 	order = 1;
 	get_type = 0;
+	change_type = 0;
 
 	switch (command) {
 	case '?':
@@ -444,9 +448,11 @@ edit(char *name, int ask_logical_size)
 	    printf("  P    (print ordered by base address)\n");
 	    printf("  i    initialize partition map\n");
 	    printf("  s    change size of partition map\n");
-	    printf("  c    create new partition (standard MkLinux type)\n");
+	    printf("  c    create new partition (standard type)\n");
 	    printf("  C    (create with type also specified)\n");
 	    printf("  d    delete a partition\n");
+	    printf("  n    change a partition's name\n");
+	    printf("  t    change a partition's type\n");
 	    printf("  r    reorder partition entry in map\n");
 	    if (!rflag) {
 		printf("  w    write the partition table\n");
@@ -504,6 +510,13 @@ edit(char *name, int ask_logical_size)
 		do_write_partition_map(map);
 		break;
 	    }
+	    break;
+	case 't':
+	    change_type = 1;
+	    // fall through
+	case 'n':
+	    do_rename_partition(map,change_type);
+	    break;
 	default:
 	do_error:
 	    bad_input("No such command (%c)", command);
@@ -544,7 +557,7 @@ do_create_partition(partition_map_header *map, int get_type)
 	return;
     }
     if (get_type == 0) {
-	add_partition_to_map(name, kUnixType, base, length, map);
+	add_partition_to_map(name, kHFSType, base, length, map);
 	goto xit1;
     } else if (get_string_argument("Type of partition: ", &type_name, 1) == 0) {
 	bad_input("Bad type");
@@ -709,6 +722,53 @@ do_write_partition_map(partition_map_header *map)
     write_partition_map(map);
 
     // exit(0);
+}
+
+void
+do_rename_partition(partition_map_header *map, int editing_type)
+{
+    partition_map * cur;
+    long index;
+
+    if (map == NULL) {
+	bad_input("No partition map exists");
+	return;
+    }
+    if (!rflag && map->writeable == 0) {
+	printf("The map is not writeable.\n");
+    }
+    if (get_number_argument("Partition number: ", &index, kDefault) == 0) {
+	bad_input("Bad partition number");
+	return;
+    }
+
+    // find partition and rename it
+    cur = find_entry_by_disk_address(index, map);
+    if (cur == NULL) {
+	printf("No such partition\n");
+    } else {
+	DPME *dpme = cur->data;
+	char *answer;
+
+	if (get_string_argument(editing_type? "New partition type: " : "New partition name: ", &answer, 1) == 0) {
+	    bad_input(editing_type? "Bad partition type" : "Bad partition name");
+	    return;
+	}
+	if (editing_type) {
+	    if (strncmp(answer, kFreeType, DPISTRLEN) == 0) {
+		bad_input("Can't create a partition with the Free type");
+		free(answer);
+		return;
+	    }
+	    if (strncmp(answer, kMapType, DPISTRLEN) == 0) {
+		bad_input("Can't create a partition with the Map type");
+		free(answer);
+		return;
+	    }
+	}
+	strncpy(editing_type ? dpme->dpme_type : dpme->dpme_name, answer, DPISTRLEN);
+	free(answer);
+    }
 }
 
 int

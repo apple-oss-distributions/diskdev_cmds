@@ -3,21 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * "Portions Copyright (c) 1999 Apple Computer, Inc.  All Rights
- * Reserved.  This file contains Original Code and/or Modifications of
- * Original Code as defined in and that are subject to the Apple Public
- * Source License Version 1.0 (the 'License').  You may not use this file
- * except in compliance with the License.  Please obtain a copy of the
- * License at http://www.apple.com/publicsource and read it before using
- * this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * 
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
  * 
  * The Original Code and all software distributed under the License are
  * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License."
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -67,8 +68,6 @@ int cancelProc(UInt16 progress, UInt16 secondsRemaining, Boolean progressChanged
     return 0;
 }
 
-extern void printIOstats(void);
-
 
 /*------------------------------------------------------------------------------
 
@@ -78,15 +77,16 @@ External
 ------------------------------------------------------------------------------*/
 
 int
-CheckHFS(int fsReadRef, int fsWriteRef, int checkLevel, int repairLevel, int logLevel, int guiControl, int *modified)
+CheckHFS( 	int fsReadRef, int fsWriteRef, int checkLevel, int repairLevel, 
+			int logLevel, int guiControl, int lostAndFoundMode, 
+			int canWrite, int *modified )
 {
 	SGlob				dataArea;	// Allocate the scav globals
 	short				temp; 	
 	FileIdentifierTable	*fileIdentifierTable	= nil;
 	OSErr				err = noErr;
 	OSErr				scavError = 0;
-	OSErr				unmountResult = nsvErr;
-	int					didRebuild = 0;
+	int					scanCount = 0;
 	Boolean 			autoRepair;
 
 	autoRepair = (fsWriteRef != -1 && repairLevel != kNeverRepair);
@@ -98,9 +98,16 @@ DoAgain:
 	dataArea.itemsProcessed		= 0;	//	Initialize to 0% complete
 	dataArea.itemsToProcess		= 1;
 	dataArea.chkLevel			= checkLevel;
+	dataArea.repairLevel		= repairLevel;
 	dataArea.logLevel			= logLevel;
-
+	dataArea.canWrite			= canWrite;
+	dataArea.lostAndFoundMode	= lostAndFoundMode;
 	dataArea.DrvNum				= fsReadRef;
+    
+    /* there are cases where we cannot get the name of the volume so we */
+    /* set our default name to one blank */
+	dataArea.volumeName[ 0 ] = ' ';
+	dataArea.volumeName[ 1 ] = '\0';
 
 	if (guiControl) {
 	    dataArea.guiControl = true;
@@ -110,12 +117,25 @@ DoAgain:
 	//	Initialize the scavenger
 	//
 	ScavCtrl( &dataArea, scavInitialize, &scavError );
-	dataArea.calculatedVCB->vcbDriveNumber = fsReadRef;
-	dataArea.calculatedVCB->vcbDriverWriteRef = fsWriteRef;
-	
-	if (checkLevel == kNeverCheck || (checkLevel == kDirtyCheck && dataArea.cleanUnmount)) {
+	if ( checkLevel == kNeverCheck || (checkLevel == kDirtyCheck && dataArea.cleanUnmount) ||
+						scavError == R_NoMem ) {
+		// also need to bail when allocate fails in ScavSetUp or we bus error!
 		goto termScav;
 	}
+
+	if (CheckIfJournaled(&dataArea)
+	    && scanCount == 0
+	    && checkLevel != kForceCheck
+	    && !(checkLevel == kPartialCheck && repairLevel == kForceRepairs)) {
+		if (!guiControl) {
+	    		printf("fsck_hfs: Volume is journaled.  No checking performed.\n");
+	    		printf("fsck_hfs: Use the -f option to force checking.\n");
+		}
+		scavError = 0;
+		goto termScav;
+	}
+	dataArea.calculatedVCB->vcbDriveNumber = fsReadRef;
+	dataArea.calculatedVCB->vcbDriverWriteRef = fsWriteRef;
 
 	//
 	//	Now verify the volume
@@ -124,7 +144,7 @@ DoAgain:
 		ScavCtrl( &dataArea, scavVerify, &scavError );
         	
 	if (scavError == noErr && logLevel >= kDebugLog)
-			printVerifyStatus(&dataArea);
+		printVerifyStatus(&dataArea);
 
 	if (scavError == noErr && !dataArea.cleanUnmount && fsWriteRef != -1)
 		CheckForClean(&dataArea, true);		/* mark volume clean */
@@ -138,8 +158,7 @@ DoAgain:
 	      dataArea.RepLevel == repairLevelUnrepairable) )
 		PrintStatus(&dataArea, M_NeedsRepair, 1, dataArea.volumeName);
 
-	if ( dataArea.volumeName[0] && 
-	     dataArea.RepLevel == repairLevelNoProblemsFound )
+	if ( scavError == noErr && dataArea.RepLevel == repairLevelNoProblemsFound )
 		PrintStatus(&dataArea, M_AllOK, 1, dataArea.volumeName);
 
 	//
@@ -156,32 +175,37 @@ DoAgain:
 		 (dataArea.RepLevel != repairLevelUnrepairable)	&&
 		 (dataArea.RepLevel != repairLevelNoProblemsFound) )
 	{	
-		ScavCtrl( &dataArea, scavRepair, &scavError );
+		// we cannot repair a volume when others have write access to the block device
+		// for the volume 
+
+		if ( dataArea.canWrite == 0 ) {
+			scavError = R_WrErr;
+			PrintStatus( &dataArea, M_OtherWriters, 0 );
+		}
+		else
+			ScavCtrl( &dataArea, scavRepair, &scavError );
 		
 		if ( scavError == noErr )
 		{
 			*modified = 1;	/* Report back that we made repairs */
-			if ( dataArea.RepLevel == repairLevelCatalogBtreeRebuild && didRebuild++ == 0 )
+			if ( (dataArea.scanAgain || dataArea.RepLevel == repairLevelCatalogBtreeRebuild) && 
+				  scanCount++ == 0 )
 			{
 				ScavCtrl( &dataArea, scavTerminate, &temp );
 				repairLevel = kMajorRepairs;
 				checkLevel = kAlwaysCheck;
+				PrintStatus(&dataArea, M_Rescan, 0);
 				goto DoAgain;
 			}
+			PrintStatus(&dataArea, M_RepairOK, 1, dataArea.volumeName);
 		}
+		else
+			PrintStatus(&dataArea, M_RepairFailed, 1, dataArea.volumeName);
 	}
-	//	We allow CheckDisk to return noErr if very minor errors wre found and the volume cannot be unmounted
-	else if ( (dataArea.RepLevel == repairLevelVeryMinorErrors) &&
-			  (unmountResult != noErr)							&&
-			  (scavError == noErr)								&&
-			  (autoRepair) )
-	{
-		err = noErr;
-	}
-	else if ( (dataArea.RepLevel == repairLevelVolumeRecoverable) ||
-			  (dataArea.RepLevel == repairLevelVeryMinorErrors) )
-	{
-		err = cdNeedsRepairsErr;
+	else if ( scavError != noErr ) {
+		PrintStatus(&dataArea, M_CheckFailed, 0);
+		if ( logLevel >= kDebugLog )
+			printf("volume check failed with error %d \n", scavError);
 	}
 
 	//	Set up structures for post processing
@@ -190,10 +214,6 @@ DoAgain:
 	//	*repairInfo = *repairInfo | kVolumeHadOverlappingExtents;	//	Report back that volume has overlapping extents
 		fileIdentifierTable	= (FileIdentifierTable *) AllocateMemory( GetHandleSize( (Handle) dataArea.fileIdentifierTable ) );
 		CopyMemory( *(dataArea.fileIdentifierTable), fileIdentifierTable, GetHandleSize( (Handle) dataArea.fileIdentifierTable ) );
-	   #if 0
-		if ( dataArea.realVCB != nil )
-			vRefNum	= dataArea.realVCB->vcbVRefNum;
-	   #endif
 	}
 
 
@@ -202,24 +222,6 @@ DoAgain:
 	//
 	if ( fileIdentifierTable != nil )
 	{
-	   #if 0
-		if ( mountErr != cdReMountErr )
-		{
-			StringHandle	directoryNameH;
-			
-			directoryNameH = GetString( rDamagedFilesDirSTRid );
-			if ( (directoryNameH != nil) && (*directoryNameH[0] != 0) )
-			{
-				HLock( (Handle) directoryNameH );
-			
-				//	Create aliases to all suspect files which should be replaced by backups
-				(void) CreateAliases( vRefNum, fileIdentifierTable, *directoryNameH );
-
-				HUnlock( (Handle) directoryNameH );
-				ReleaseResource( (Handle) directoryNameH );
-			}
-		}
-	    #endif		
 		DisposeMemory( fileIdentifierTable );
 	}
 
@@ -229,11 +231,13 @@ termScav:
 	//
 	//	Terminate the scavenger
 	//
+
+	if ( logLevel >= kDebugLog && 
+		 (err != noErr || dataArea.RepLevel != repairLevelNoProblemsFound) )
+		PrintVolumeObject();
+
 	ScavCtrl( &dataArea, scavTerminate, &temp );		//	Note: use a temp var so that real scav error can be returned
-
-	if (logLevel >= kDebugLog)
-		printIOstats();
-
+		
 	return( err );
 }
 
@@ -300,13 +304,29 @@ void ScavCtrl( SGlobPtr GPtr, UInt32 ScavOp, short *ScavRes )
 				if (GPtr->chkLevel == kNeverCheck) {
 					if (clean == -1)
 						result = R_BadSig;
-					else if (clean == 0)
-						result = R_Dirty;
+					else if (clean == 0) {
+						/*
+						 * We lie for journaled file systems since
+						 * they get cleaned up in mount by replaying
+						 * the journal.
+						 */
+						if (CheckIfJournaled(GPtr))
+							GPtr->cleanUnmount = true;
+						else
+							result = R_Dirty;
+					}
 					break;
 				}
 
 				if (GPtr->cleanUnmount)
 					break;
+			}
+			
+			if (CheckIfJournaled(GPtr)
+			    && GPtr->chkLevel != kForceCheck
+			    && !(GPtr->chkLevel == kPartialCheck && GPtr->repairLevel == kForceRepairs)
+				&& !(GPtr->chkLevel == kAlwaysCheck && GPtr->repairLevel == kMajorRepairs)) {
+			    break;
 			}
 			
 			result = IVChk( GPtr );
@@ -325,7 +345,7 @@ void ScavCtrl( SGlobPtr GPtr, UInt32 ScavOp, short *ScavRes )
 			gettimeofday( &myEndTime, &zone );
 			timersub( &myEndTime, &myStartTime, &myElapsedTime );
 			printf( "\n%s - BitMapCheck elapsed time \n", __FUNCTION__ );
-			printf( ">>>>>>>>>>>>> secs %d msecs %d \n\n", 
+			printf( "########## secs %d msecs %d \n\n", 
 				myElapsedTime.tv_sec, myElapsedTime.tv_usec );
 #endif
 
@@ -363,9 +383,7 @@ void ScavCtrl( SGlobPtr GPtr, UInt32 ScavOp, short *ScavRes )
 				break;
 
 			GPtr->itemsProcessed += GPtr->onePercent;	// We do this 4 times as set up in CalculateItemCount() to smooth the scroll
-			
-			if ( ! IsWrapperVolume( GPtr->volumeType, GPtr->inputFlags ) )
-				WriteMsg( GPtr, M_ExtBTChk, kStatusMessage );
+			WriteMsg( GPtr, M_ExtBTChk, kStatusMessage );
 
 #if SHOW_ELAPSED_TIMES
 			gettimeofday( &myStartTime, &zone );
@@ -394,9 +412,7 @@ void ScavCtrl( SGlobPtr GPtr, UInt32 ScavOp, short *ScavRes )
 			
 			GPtr->itemsProcessed += GPtr->onePercent;	// We do this 4 times as set up in CalculateItemCount() to smooth the scroll
 			GPtr->itemsProcessed += GPtr->onePercent;
-
-			if ( ! IsWrapperVolume( GPtr->volumeType, GPtr->inputFlags ) )
-				WriteMsg( GPtr, M_CatBTChk, kStatusMessage );
+			WriteMsg( GPtr, M_CatBTChk, kStatusMessage );
 
 #if SHOW_ELAPSED_TIMES
 			gettimeofday( &myStartTime, &zone );
@@ -425,8 +441,8 @@ void ScavCtrl( SGlobPtr GPtr, UInt32 ScavOp, short *ScavRes )
 
 			if (result = CheckForStop(GPtr))
 				break;
-			if ( ! IsWrapperVolume( GPtr->volumeType, GPtr->inputFlags ) )
-				WriteMsg( GPtr, M_CatHChk, kStatusMessage );
+
+			WriteMsg( GPtr, M_CatHChk, kStatusMessage );
 
 #if SHOW_ELAPSED_TIMES
 			gettimeofday( &myStartTime, &zone );
@@ -445,14 +461,12 @@ void ScavCtrl( SGlobPtr GPtr, UInt32 ScavOp, short *ScavRes )
 
 			if (result = CheckForStop(GPtr))
 				break;
-			
 			if (result = AttrBTChk(GPtr))
 				break;
 			if (result = CheckForStop(GPtr))
 				break;
 
-			if ( ! IsWrapperVolume( GPtr->volumeType, GPtr->inputFlags ) )
-				WriteMsg( GPtr, M_VolumeBitMapChk, kStatusMessage );
+			WriteMsg( GPtr, M_VolumeBitMapChk, kStatusMessage );
 
 #if SHOW_ELAPSED_TIMES
 			gettimeofday( &myStartTime, &zone );
@@ -472,8 +486,7 @@ void ScavCtrl( SGlobPtr GPtr, UInt32 ScavOp, short *ScavRes )
 			if (result = CheckForStop(GPtr))
 				break;
 
-			if ( ! IsWrapperVolume( GPtr->volumeType, GPtr->inputFlags ) )
-				WriteMsg( GPtr, M_VInfoChk, kStatusMessage );
+			WriteMsg( GPtr, M_VInfoChk, kStatusMessage );
 
 #if SHOW_ELAPSED_TIMES
 			gettimeofday( &myStartTime, &zone );
@@ -509,13 +522,6 @@ void ScavCtrl( SGlobPtr GPtr, UInt32 ScavOp, short *ScavRes )
 			}
 			else if ( GPtr->RepLevel == repairLevelNoProblemsFound )
 			{
-			    #if 0
-				if ( GPtr->isHFSPlus == true )
-				{	//	If the real VCB is an ExtendedVCB (2200861)
-					if ( (GPtr->volumeFeatures & volumeIsMountedMask) && (GPtr->volumeFeatures & supportsHFSPlusVolsFeatureMask) )
-						GetDateTime( &(GPtr->realVCB->checkedDate) );
-				}
-			    #endif
 			}
 
 			GPtr->itemsProcessed = GPtr->itemsToProcess;
@@ -696,8 +702,13 @@ static int ScavSetUp( SGlob *GPtr)
 		ScavStaticStructures	*pointer;
 		
 		pointer = (ScavStaticStructures *) AllocateClearMemory( sizeof(ScavStaticStructures) );
-		if ( pointer == nil )
+		if ( pointer == nil ) {
+			if ( GPtr->logLevel >= kDebugLog ) {
+				printf( "\t error %d - could not allocate %ld bytes of memory \n",
+					R_NoMem, sizeof(ScavStaticStructures) );
+			}
 			return( R_NoMem );
+		}
 	
 		GPtr->calculatedVCB = vcb	= &pointer->vcb;
 		
@@ -726,7 +737,6 @@ static int ScavSetUp( SGlob *GPtr)
 	//	locate the driveQ element for drive being scavenged
 	//
  	GPtr->DrvPtr	= 0;							//	<8> initialize so we can know if drive disappears
- //	GPtr->realVCB	= nil;							//	assume volume not mounted
 
 	//
 	//	Set up Real structures
@@ -849,11 +859,20 @@ static int ScavSetUp( SGlob *GPtr)
 	GPtr->CatStat			= 0;
 	GPtr->VeryMinorErrorsStat	= 0;
 
- 
+ 	// 
+ 	// Initialize VolumeObject
+ 	//
+ 	
+ 	InitializeVolumeObject( GPtr );
+ 	
 	// Keep a valid file id list for HFS volumes
 	GPtr->validFilesList = (UInt32**)NewHandle( 0 );
-	if ( GPtr->validFilesList == nil )
+	if ( GPtr->validFilesList == nil ) {
+		if ( GPtr->logLevel >= kDebugLog ) {
+			printf( "\t error %d - could not allocate file ID list \n", R_NoMem );
+		}
 		return( R_NoMem );
+	}
 
 	return( noErr );
 

@@ -1,23 +1,24 @@
 /*
- * Copyright (c) 1999 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 1999-2003 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * "Portions Copyright (c) 1999 Apple Computer, Inc.  All Rights
- * Reserved.  This file contains Original Code and/or Modifications of
- * Original Code as defined in and that are subject to the Apple Public
- * Source License Version 1.0 (the 'License').  You may not use this file
- * except in compliance with the License.  Please obtain a copy of the
- * License at http://www.apple.com/publicsource and read it before using
- * this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * 
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
  * 
  * The Original Code and all software distributed under the License are
  * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License."
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -262,6 +263,66 @@ CompareExtendedCatalogKeys(HFSPlusCatalogKey *searchKey, HFSPlusCatalogKey *tria
 	return result;
 }
 
+
+/* 
+ * Routine:	CaseSensitiveCatalogKeyCompare
+ *
+ * Function:	Compares two catalog keys using a 16-bit binary comparison
+ *		for the name portion of the key. 
+ *
+ * Result:	+n  search key > trial key
+ *		0  search key = trial key
+ *		-n  search key < trial key
+ */
+
+SInt32
+CaseSensitiveCatalogKeyCompare(HFSPlusCatalogKey *searchKey, HFSPlusCatalogKey *trialKey)
+{
+	HFSCatalogNodeID searchParentID, trialParentID;
+	SInt32 result;
+
+	searchParentID = searchKey->parentID;
+	trialParentID = trialKey->parentID;
+	result = 0;
+	
+	if (searchParentID > trialParentID) {
+		++result;
+	} else if (searchParentID < trialParentID) {
+		--result;
+	} else {
+		UInt16 * str1 = &searchKey->nodeName.unicode[0];
+		UInt16 * str2 = &trialKey->nodeName.unicode[0];
+		int length1 = searchKey->nodeName.length;
+		int length2 = trialKey->nodeName.length;
+		UInt16 c1, c2;
+		int length;
+	
+		if (length1 < length2) {
+			length = length1;
+			--result;
+		} else if (length1 > length2) {
+			length = length2;
+			++result;
+		} else {
+			length = length1;
+		}
+	
+		while (length--) {
+			c1 = *(str1++);
+			c2 = *(str2++);	
+			if (c1 > c2) {
+				result = 1;
+				break;
+			}
+			if (c1 < c2) {
+				result = -1;
+				break;
+			}
+		}
+	}
+
+	return result;
+}
 
 //ÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑÑ
 //	Routine:	CompareExtentKeys

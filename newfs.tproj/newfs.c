@@ -3,21 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * "Portions Copyright (c) 1999 Apple Computer, Inc.  All Rights
- * Reserved.  This file contains Original Code and/or Modifications of
- * Original Code as defined in and that are subject to the Apple Public
- * Source License Version 1.0 (the 'License').  You may not use this file
- * except in compliance with the License.  Please obtain a copy of the
- * License at http://www.apple.com/publicsource and read it before using
- * this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * 
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
  * 
  * The Original Code and all software distributed under the License are
  * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License."
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -184,7 +185,6 @@ void	fatal();
  */
 #define	NRPOS		8	/* number distinct rotational positions */
 
-int	mfs;			/* run as the memory based filesystem */
 int	Nflag;			/* run without writing file system */
 int	Oflag;			/* format as an 4.3BSD file system */
 int	fssize;			/* file system size */
@@ -215,6 +215,8 @@ int	maxcontig = 0;		/* max contiguous blocks to allocate */
 int	rotdelay = ROTDELAY;	/* rotational delay between blocks */
 int	maxbpg;			/* maximum blocks per file in a cyl group */
 int	nrpos = NRPOS;		/* # of distinguished rotational positions */
+int	avgfilesize = AVFILESIZ;/* expected average file size */
+int	avgfilesperdir = AFPDIR;/* expected number of files per directory */
 int	bbsize = BBSIZE;	/* boot block size */
 int	sbsize = SBSIZE;	/* superblock size */
 int	mntflags = MNT_ASYNC;	/* flags to be passed to mount */
@@ -255,14 +257,7 @@ main(argc, argv)
 	else
 		progname = *argv;
 
-	if (strstr(progname, "mfs")) {
-		mfs = 1;
-		Nflag++;
-	}
-
-	opstring = mfs ?
-	    "NT:a:b:c:d:e:f:i:m:o:s:" :
-	    "NOS:T:a:b:c:d:e:f:i:k:l:m:n:o:p:r:s:t:u:v:x:";
+	opstring = "NOS:T:a:b:c:d:e:f:g:h:i:k:l:m:n:o:p:r:s:t:u:v:x:";
 	while ((ch = getopt(argc, argv, opstring)) != EOF)
 		switch (ch) {
 		case 'N':
@@ -307,6 +302,14 @@ main(argc, argv)
 			if ((fsize = atoi(optarg)) <= 0)
 				fatal("%s: bad fragment size", optarg);
 			break;
+		case 'g':
+			if ((avgfilesize = atoi(optarg)) <= 0)
+				fatal("%s: bad average file size", optarg);
+			break;
+		case 'h':
+			if ((avgfilesperdir = atoi(optarg)) <= 0)
+				fatal("%s: bad average files per dir", optarg);
+			break;
 		case 'i':
 			if ((density = atoi(optarg)) <= 0)
 				fatal("%s: bad bytes per inode\n", optarg);
@@ -329,16 +332,12 @@ main(argc, argv)
 				    optarg);
 			break;
 		case 'o':
-			if (mfs)
-				getmntopts(optarg, mopts, &mntflags, 0);
-			else {
-				if (strcmp(optarg, "space") == 0)
-					opt = FS_OPTSPACE;
-				else if (strcmp(optarg, "time") == 0)
-					opt = FS_OPTTIME;
-				else
+			if (strcmp(optarg, "space") == 0)
+				opt = FS_OPTSPACE;
+			else if (strcmp(optarg, "time") == 0)
+				opt = FS_OPTTIME;
+			else
 	fatal("%s: unknown optimization preference: use `space' or `time'.");
-			}
 			break;
 		case 'p':
 			if ((trackspares = atoi(optarg)) < 0)
@@ -381,7 +380,7 @@ main(argc, argv)
 	argc -= optind;
 	argv += optind;
 
-	if (argc != 2 && (mfs || argc != 1))
+	if (argc != 2 && (argc != 1))
 		usage();
 
 	special = argv[0];
@@ -445,7 +444,7 @@ main(argc, argv)
 			++mp;
 		}
 #endif
-		if (!mfs) { /* clear out the start of the filesystem */
+		{ /* clear out the start of the filesystem */
 		    void * 	buf;
 #define WIPE_START		((ssize_t)128 * 1024)
 
@@ -474,11 +473,11 @@ main(argc, argv)
 	if (fstat(fsi, &st) < 0)
 		fatal("%s: %s", special, strerror(errno));
 //	printf("Fstat returned OK\n");
-	if ((st.st_mode & S_IFMT) != S_IFCHR && !mfs)
+	if ((st.st_mode & S_IFMT) != S_IFCHR)
 		printf("%s: %s: not a character-special device\n",
 		    progname, special);
 #ifdef COMPAT
-	if (!mfs && disktype == NULL)
+	if (disktype == NULL)
 		disktype = argv[1];
 #endif
 //	printf("Getting disklabel\n");
@@ -498,7 +497,7 @@ main(argc, argv)
 		      argv[0]);
 	if (fssize == 0)
 		fssize = pp->p_size;
-	if (fssize > pp->p_size && !mfs)
+	if (fssize > pp->p_size)
 	       fatal("%s: maximum file system size on the partition is %d",
 			argv[0], pp->p_size);
 	if (rpm == 0) {
@@ -618,24 +617,6 @@ main(argc, argv)
 	}
 	close(fsi);
 	
-#ifdef MFS
-#warning  MFS enabled; check this path in the code if you see this
-	if (mfs) {
-		struct mfs_args args;
-
-		sprintf(buf, "mfs:%d", getpid());
-		args.fspec = buf;
-		args.export.ex_root = -2;
-		if (mntflags & MNT_RDONLY)
-			args.export.ex_flags = MNT_EXRDONLY;
-		else
-			args.export.ex_flags = 0;
-		args.base = membase;
-		args.size = fssize * sectorsize;
-		if (mount("mfs", argv[1], mntflags, &args) < 0)
-			fatal("%s: %s", argv[1], strerror(errno));
-	}
-#endif
 	exit(0);
 }
 
@@ -716,11 +697,6 @@ fatal(fmt, va_alist)
 void
 usage()
 {
-	if (mfs) {
-		fprintf(stderr,
-		    "usage: %s [ -fsoptions ] special-device mount-point\n",
-			progname);
-	} else
 		fprintf(stderr,
 		    "usage: %s [ -fsoptions ] special-device%s\n",
 		    progname,
@@ -743,6 +719,8 @@ usage()
 	fprintf(stderr, "\t-d rotational delay between contiguous blocks\n");
 	fprintf(stderr, "\t-e maximum blocks per file in a cylinder group\n");
 	fprintf(stderr, "\t-f frag size\n");
+	fprintf(stderr, "\t-g average file size\n");
+	fprintf(stderr, "\t-h average files per directory\n");
 	fprintf(stderr, "\t-i number of bytes per inode\n");
 	fprintf(stderr, "\t-k sector 0 skew, per track\n");
 	fprintf(stderr, "\t-l hardware sector interleave\n");

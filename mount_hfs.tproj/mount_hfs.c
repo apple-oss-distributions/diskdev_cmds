@@ -1,24 +1,21 @@
 /*
- * Copyright (c) 1999-2003 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 1999-2004 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.2 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -66,9 +63,6 @@ struct mntopt mopts[] = {
 };
 
 #define HFS_MOUNT_TYPE				"hfs"
-
-#define DEFAULT_ROOTUID	-2
-#define DEFAULT_ANON_UID -2
 
 gid_t	a_gid __P((char *));
 uid_t	a_uid __P((char *));
@@ -259,7 +253,7 @@ void syncCreateDate(const char *mntpt, u_long localCreateTime)
  *
  * Note: unloading of encoding converter modules is done in the kernel
  */
-static void
+static int
 load_encoding(struct hfs_mnt_encoding *encp)
 {
 	int pid;
@@ -269,11 +263,14 @@ load_encoding(struct hfs_mnt_encoding *encp)
 	char kmodfile[MAXPATHLEN];
 	
 	/* MacRoman encoding (0) is built into the kernel */
-	if (encp->encoding_id == 0) return;
+	if (encp->encoding_id == 0)
+		return (0);
 
 	sprintf(kmodfile, "%sHFS_Mac%s.kext", ENCODING_MODULE_PATH, encp->encoding_name);
-	if (stat(kmodfile, &sb) == -1)
-		errx(1, "unable to find: %s", kmodfile);
+	if (stat(kmodfile, &sb) == -1) {
+		fprintf(stdout, "unable to find: %s\n", kmodfile);
+		return (-1);
+	}
 
 	loaded = 0;
 	pid = fork();
@@ -288,8 +285,11 @@ load_encoding(struct hfs_mnt_encoding *encp)
 		}
 	}
 
-	if (!loaded)
-		errx(1, "unable to load: %s", kmodfile);
+	if (!loaded) {
+		fprintf(stderr, "unable to load: %s\n", kmodfile);
+		return (-1);
+	}
+	return (0);
 }
 
 int
@@ -412,19 +412,14 @@ main(argc, argv)
 		err(1, "realpath %s", dir);
 
 	args.fspec = dev;
-	args.export.ex_root = DEFAULT_ROOTUID;
-	args.export.ex_anon.cr_uid = DEFAULT_ANON_UID;		/* mapping for anonymous users */
-	if (mntflags & MNT_RDONLY)
-		args.export.ex_flags = MNT_EXRDONLY;
-	else
-		args.export.ex_flags = 0;
 
 	/* HFS volumes need timezone info to convert local to GMT */
 	(void) gettimeofday( &dummy_timeval, &args.hfs_timezone );
 
 	/* load requested encoding (if any) for hfs volume */
 	if (encp != NULL) {
-		load_encoding(encp);
+		if (load_encoding(encp) != 0)
+			exit(1);  /* load failure */
 		args.hfs_encoding = encp->encoding_id;
 	}
 	
@@ -443,8 +438,8 @@ main(argc, argv)
 			/* Check if volume had a previous encoding preference. */
 			encp = get_encoding_pref(dev);
 			if (encp != NULL) {
-				load_encoding(encp);
-				args.hfs_encoding = encp->encoding_id;
+				if (load_encoding(encp) == 0)
+					args.hfs_encoding = encp->encoding_id;
 			}
 		}
 		/* when the mountpoint is root, use default values */
@@ -622,22 +617,25 @@ get_encoding_pref(char *dev)
 
 	/* Can only load encoding modules if root. */
 	if (geteuid() != 0)
-		goto next;
+		return (NULL);
 
 	fd = open(dev, O_RDONLY | O_NDELAY, 0);
 	if (fd == -1)
-		goto next;
+		return (NULL);
 
      	if (pread(fd, buffer, sizeof(buffer), 1024) != sizeof(buffer)) {
      		close(fd);
-		goto next;
+		return (NULL);
 	}
+    	close(fd);
+
 	mdbp = (HFSMasterDirectoryBlock *) buffer;
-	if (SWAP_BE16(mdbp->drSigWord) == kHFSSigWord) {
-		encoding = GET_HFS_TEXT_ENCODING(SWAP_BE32(mdbp->drFndrInfo[4]));
-     	}
-	close(fd);
-next:
+	if (SWAP_BE16(mdbp->drSigWord) != kHFSSigWord ||
+	    SWAP_BE16(mdbp->drEmbedSigWord) == kHFSPlusSigWord ) {
+		return (NULL);
+	}
+	encoding = GET_HFS_TEXT_ENCODING(SWAP_BE32(mdbp->drFndrInfo[4]));
+
 	if (encoding == -1) {
 		encoding = get_encoding_bias();
 		if (encoding == 0 || encoding == -1)

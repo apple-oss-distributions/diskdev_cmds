@@ -3,22 +3,21 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
- * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
+ * "Portions Copyright (c) 1999 Apple Computer, Inc.  All Rights
+ * Reserved.  This file contains Original Code and/or Modifications of
+ * Original Code as defined in and that are subject to the Apple Public
+ * Source License Version 1.0 (the 'License').  You may not use this file
+ * except in compliance with the License.  Please obtain a copy of the
+ * License at http://www.apple.com/publicsource and read it before using
+ * this file.
  * 
  * The Original Code and all software distributed under the License are
  * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License."
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -449,37 +448,69 @@ SInt32 CompareExtentKeysPlus( const HFSPlusExtentKey *searchKey, const HFSPlusEx
 }
 
 
-SInt32 CompareAttributeKeys( const void *inSearchKey, const void *inTrialKey )
+/*
+ * Compare two attribute b-tree keys.
+ *
+ * The name portion of the key is compared using a 16-bit binary comparison. 
+ * This is called from the b-tree code.
+ */
+__private_extern__
+SInt32
+CompareAttributeKeys(const AttributeKey *searchKey, const AttributeKey *trialKey)
 {
-	const AttributeKey *searchKey = inSearchKey;
-	const AttributeKey *trialKey = inTrialKey;
-	SInt32 temp;
-		
-	/*
-	 * First, compare the CNID's
-	 */
-	if (searchKey->cnid != trialKey->cnid) {
-		return (searchKey->cnid < trialKey->cnid ? -1 : 1);
-	}
+	UInt32 searchFileID, trialFileID;
+	SInt32 result;
 
-	/*
-	 * CNID's are equal; compare names
-	 */
-	if (searchKey->attributeName.length == 0 || trialKey->attributeName.length == 0)
-		return (searchKey->attributeName.length < trialKey->attributeName.length ? -1 : 1);
+	searchFileID = searchKey->cnid;
+	trialFileID = trialKey->cnid;
+	result = 0;
+	
+	if (searchFileID > trialFileID) {
+		++result;
+	} else if (searchFileID < trialFileID) {
+		--result;
+	} else {
+		UInt16 * str1 = &searchKey->attrName[0];
+		UInt16 * str2 = &trialKey->attrName[0];
+		int length1 = searchKey->attrNameLen;
+		int length2 = trialKey->attrNameLen;
+		UInt16 c1, c2;
+		int length;
+	
+		if (length1 < length2) {
+			length = length1;
+			--result;
+		} else if (length1 > length2) {
+			length = length2;
+			++result;
+		} else {
+			length = length1;
+		}
+	
+		while (length--) {
+			c1 = *(str1++);
+			c2 = *(str2++);
+	
+			if (c1 > c2) {
+				result = 1;
+				break;
+			}
+			if (c1 < c2) {
+				result = -1;
+				break;
+			}
+		}
+		if (result)
+			return (result);
+		/*
+		 * Names are equal; compare startBlock
+		 */
+		if (searchKey->startBlock == trialKey->startBlock)
+			return (0);
+		else
+			return (searchKey->startBlock < trialKey->startBlock ? -1 : 1);
+		}
 
-	temp = FastUnicodeCompare(&searchKey->attributeName.unicode[0],
-				searchKey->attributeName.length,
-				&trialKey->attributeName.unicode[0],
-				trialKey->attributeName.length);
-	if (temp != 0)
-		return (temp);
-
-	/*
-	 * Names are equal; compare startBlock
-	 */
-	if (searchKey->startBlock == trialKey->startBlock)
-		return (0);
-	else
-		return (searchKey->startBlock < trialKey->startBlock ? -1 : 1);
+	return result;
 }
+

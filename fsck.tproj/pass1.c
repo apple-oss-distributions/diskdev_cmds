@@ -84,6 +84,12 @@ pass1()
 	/*
 	 * Set file system reserved blocks in used block map.
 	 */
+
+	if (sblock.fs_ncg > sblock.fs_size) {
+		pfatal("BAD SUPERBLOCK; SPECIFY ALTERNATE SUPERBLOCK WITH -b");
+		exit(1);
+	}
+
 	for (c = 0; c < sblock.fs_ncg; c++) {
 		cgd = cgdmin(&sblock, c);
 		if (c == 0) {
@@ -181,8 +187,8 @@ checkinode(inumber, idesc)
 #endif	/* REV_ENDIAN_FS */
 			if (debug) {
 				symbuf[dp->di_size] = 0;
-				printf("convert symlink %d(%s) of size %d\n",
-					inumber, symbuf, (long)dp->di_size);
+				printf("convert symlink %d(%s) of size %qu\n",
+					inumber, symbuf, dp->di_size);
 			}
 			dp = ginode(inumber);
 			memmove(dp->di_shortlink, symbuf, (long)dp->di_size);
@@ -206,7 +212,7 @@ checkinode(inumber, idesc)
 	for (j = ndb; j < NDADDR; j++)
 		if (dp->di_db[j] != 0) {
 			if (debug)
-				printf("bad direct addr: %ld\n", dp->di_db[j]);
+				printf("bad direct addr: %u\n", dp->di_db[j]);
 			goto unknown;
 		}
 	for (j = 0, ndb -= NDADDR; ndb > 0; j++)
@@ -214,8 +220,7 @@ checkinode(inumber, idesc)
 	for (; j < NIADDR; j++)
 		if (dp->di_ib[j] != 0) {
 			if (debug)
-				printf("bad indirect addr: %ld\n",
-					dp->di_ib[j]);
+				printf("bad indirect addr: %u\n", dp->di_ib[j]);
 			goto unknown;
 		}
 	if (ftypeok(dp) == 0)

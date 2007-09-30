@@ -26,7 +26,7 @@ MAKEFILE = tool.make
 NEXTSTEP_INSTALLDIR = /sbin
 WINDOWS_INSTALLDIR = /sbin
 PDO_UNIX_INSTALLDIR = /sbin
-LIBS = -lcrypto 
+LIBS = 
 DEBUG_LIBS = $(LIBS)
 PROF_LIBS = $(LIBS)
 
@@ -34,7 +34,7 @@ PROF_LIBS = $(LIBS)
 FRAMEWORKS = -framework CoreFoundation
 
 HEADER_PATHS = -I ${MOUNT}
-NEXTSTEP_PB_CFLAGS = -D_LONG_LONG -Wno-four-char-constants
+NEXTSTEP_PB_CFLAGS = -D_LONG_LONG -Wno-four-char-constants -Wall -Werror
 
 NEXTSTEP_BUILD_OUTPUT_DIR = /tmp/BUILD
 

@@ -171,13 +171,21 @@ enum {
 #define MAC_GMT_FACTOR		2082844800UL
 
 
-
+/* sectorSize = kBytesPerSector = 512
+   sectorOffset and totalSectors are in terms of 512-byte sector size.
+*/
 struct DriveInfo {
 	int	fd;
 	UInt32	sectorSize;
 	UInt32	sectorOffset;
-	UInt32	sectorsPerIO;
 	UInt64	totalSectors;
+
+	/* actual device info. physSectorSize is necessary to de-block
+	 * while using the raw device.
+	 */
+	UInt32	physSectorSize;
+	UInt64	physSectorsPerIO;
+	UInt64  physTotalSectors;
 };
 typedef struct DriveInfo DriveInfo;
 
@@ -206,11 +214,11 @@ struct hfsparams {
 	UInt32 		allocationClumpSize;
 	UInt32          createDate;             /* in UTC */
 	UInt32		hfsAlignment;
-	UInt8		volumeName[kHFSPlusMaxFileNameChars + 1];  /* in UTF-8 */
+	unsigned char volumeName[kHFSPlusMaxFileNameChars + 1];  /* in UTF-8 */
 	UInt32		encodingHint;
 	UInt32 		journaledHFS;
 	UInt32 		journalSize;
-	UInt8		*journalDevice;
+	char 		*journalDevice;
 	uid_t		owner;
 	gid_t		group;
 	mode_t		mask;

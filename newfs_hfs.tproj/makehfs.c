@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999-2003 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 1999-2007 Apple Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
@@ -45,12 +45,20 @@
 #include <string.h>
 #include <unistd.h>
 
-#include <openssl/sha.h>
+/*
+ * CommonCrypto is meant to be a more stable API than OpenSSL.
+ * Defining COMMON_DIGEST_FOR_OPENSSL gives API-compatibility
+ * with OpenSSL, so we don't have to change the code.
+ */
+#define COMMON_DIGEST_FOR_OPENSSL
+#include <CommonCrypto/CommonDigest.h>
 
 #include <architecture/byte_order.h>
 
 #include <CoreFoundation/CFString.h>
 #include <CoreFoundation/CFStringEncodingExt.h>
+
+#include <TargetConditionals.h>
 
 extern Boolean _CFStringGetFileSystemRepresentation(CFStringRef string, UInt8 *buffer, CFIndex maxBufLen);
 
@@ -76,8 +84,8 @@ typedef HFSMasterDirectoryBlock HFS_MDB;
 struct filefork {
 	UInt16	startBlock;
 	UInt16	blockCount;
-	SInt32	logicalSize;
-	SInt32	physicalSize;
+	UInt32	logicalSize;
+	UInt32	physicalSize;
 };
 
 struct filefork	gDTDBFork, gSystemFork, gReadMeFork;
@@ -114,8 +122,6 @@ static void InitSecondCatalogLeaf __P((const hfsparams_t *dp, void *buffer));
 static void WriteDesktopDB(const hfsparams_t *dp, const DriveInfo *driveInfo,
         UInt32 startingSector, void *buffer, UInt32 *mapNodes);
 
-static void ClearDisk __P((const DriveInfo *driveInfo, UInt64 startingSector,
-		UInt32 numberOfSectors));
 static void WriteSystemFile __P((const DriveInfo *dip, UInt32 startingSector,
 		UInt32 *filesize));
 static void WriteReadMeFile __P((const DriveInfo *dip, UInt32 startingSector,
@@ -138,7 +144,7 @@ static UInt32 DivideAndRoundUp __P((UInt32 numerator, UInt32 denominator));
 static int ConvertUTF8toUnicode __P((const UInt8* source, UInt32 bufsize,
 		UniChar* unibuf, UInt16 *charcount));
 
-static int getencodinghint(char *name);
+static int getencodinghint(unsigned char *name);
 
 #define VOLUMEUUIDVALUESIZE 2
 typedef union VolumeUUID {
@@ -158,10 +164,15 @@ void SETOFFSET (void *buffer, UInt16 btNodeSize, SInt16 recOffset, SInt16 vecOff
 
 #define ROUNDUP(x, u)	(((x) % (u) == 0) ? (x) : ((x)/(u) + 1) * (u))
 
+#if TARGET_OS_EMBEDDED
+#define ENCODING_TO_BIT(e)				 \
+	  ((e) < 48 ? (e) : 0)
+#else
 #define ENCODING_TO_BIT(e)                               \
           ((e) < 48 ? (e) :                              \
           ((e) == kCFStringEncodingMacUkrainian ? 48 :   \
           ((e) == kCFStringEncodingMacFarsi ? 49 : 0)))
+#endif
 
 /*
  * make_hfs
@@ -216,9 +227,9 @@ make_hfs(const DriveInfo *driveInfo,
 		diskBlocksUsed += MAX(sizeof(hfswrap_readme), mdbp->drAlBlkSiz) / kBytesPerSector;
 		diskBlocksUsed += MAX(24 * 1024, mdbp->drAlBlkSiz) / kBytesPerSector;
 	}
-	ClearDisk(driveInfo, 0, diskBlocksUsed);
+	WriteBuffer(driveInfo, 0, diskBlocksUsed * kBytesPerSector, NULL);
 	/* also clear out last 8 sectors (4K) */
-	ClearDisk(driveInfo, driveInfo->totalSectors - 8, 8);
+	WriteBuffer(driveInfo, driveInfo->totalSectors - 8, 4 * 1024, NULL);
 
 	/* If this is a wrapper, add boot files... */
 	if (defaults->flags & kMakeHFSWrapper) {
@@ -251,12 +262,10 @@ make_hfs(const DriveInfo *driveInfo,
 		gSystemFork.blockCount = BYTESTOBLKS(gSystemFork.logicalSize, mdbp->drAlBlkSiz);
 		gSystemFork.physicalSize = gSystemFork.blockCount * mdbp->drAlBlkSiz;
 
-		(UInt16)mdbp->drFreeBks -= gDTDBFork.blockCount +
-				   	gReadMeFork.blockCount +
-				   	gSystemFork.blockCount;
+		mdbp->drFreeBks -= gDTDBFork.blockCount + gReadMeFork.blockCount + gSystemFork.blockCount;
 		mdbp->drEmbedExtent.startBlock = mdbp->drNmAlBlks - (UInt16)mdbp->drFreeBks;
 		mdbp->drEmbedExtent.blockCount = (UInt16)mdbp->drFreeBks;
-		(UInt16)mdbp->drFreeBks = 0;
+		mdbp->drFreeBks = 0;
 	}
 
 
@@ -347,10 +356,10 @@ make_hfsplus(const DriveInfo *driveInfo, hfsparams_t *defaults)
 	volumeBlocksUsed = header->totalBlocks - header->freeBlocks - 1;
 	if ( header->blockSize == 512 )
 		volumeBlocksUsed--;
-	bytesUsed = (header->totalBlocks - header->freeBlocks) * sectorsPerBlock;
-	ClearDisk(driveInfo, 0, bytesUsed);
+	bytesUsed = ((header->totalBlocks - header->freeBlocks) * sectorsPerBlock) * kBytesPerSector;
+	WriteBuffer(driveInfo, 0, bytesUsed, NULL);
 	/* also clear out last 8 sectors (4K) */
-	ClearDisk(driveInfo, driveInfo->totalSectors - 8, 8);
+	WriteBuffer(driveInfo, driveInfo->totalSectors - 8, 4 * 1024, NULL);
 
 	/*--- Allocate a buffer for the rest of our IO:  */
 
@@ -524,7 +533,7 @@ InitMDB(hfsparams_t *defaults, UInt32 driveBlocks, HFS_MDB *mdbp)
 	mdbp->drAlBlkSiz = alBlkSize;
 	mdbp->drClpSiz = defaults->dataClumpSize;
 	mdbp->drNxtCNID = defaults->nextFreeFileID;
-	(UInt16)mdbp->drFreeBks = numAlBlks;
+	mdbp->drFreeBks = numAlBlks;
 	
 	/*
 	 * Map UTF-8 input into a Mac encoding.
@@ -536,7 +545,7 @@ InitMDB(hfsparams_t *defaults, UInt32 driveBlocks, HFS_MDB *mdbp)
 		CFIndex maxchars;
 		Boolean cfOK;
 	
-		cfstr = CFStringCreateWithCString(kCFAllocatorDefault, defaults->volumeName, kCFStringEncodingUTF8);
+		cfstr = CFStringCreateWithCString(kCFAllocatorDefault, (char *)defaults->volumeName, kCFStringEncodingUTF8);
 
 		/* Find out what Mac encoding to use: */
 		maxchars = MIN(sizeof(unibuf)/sizeof(UniChar), CFStringGetLength(cfstr));
@@ -563,13 +572,13 @@ InitMDB(hfsparams_t *defaults, UInt32 driveBlocks, HFS_MDB *mdbp)
 	mdbp->drXTFlSize = mdbp->drXTClpSiz = defaults->extentsClumpSize;
 	mdbp->drXTExtRec[0].startBlock = 0;
 	mdbp->drXTExtRec[0].blockCount = mdbp->drXTFlSize / alBlkSize;
-	(UInt16)mdbp->drFreeBks -= mdbp->drXTExtRec[0].blockCount;
+	mdbp->drFreeBks -= mdbp->drXTExtRec[0].blockCount;
 
 	mdbp->drCTFlSize = mdbp->drCTClpSiz = defaults->catalogClumpSize;
 	mdbp->drCTExtRec[0].startBlock = mdbp->drXTExtRec[0].startBlock +
 					 mdbp->drXTExtRec[0].blockCount;
 	mdbp->drCTExtRec[0].blockCount = mdbp->drCTFlSize / alBlkSize;
-	(UInt16)mdbp->drFreeBks -= mdbp->drCTExtRec[0].blockCount;
+	mdbp->drFreeBks -= mdbp->drCTExtRec[0].blockCount;
 
 	if (defaults->flags & kMakeHFSWrapper) {
 		mdbp->drFilCnt = mdbp->drNmFls = kWapperFileCount;
@@ -1126,14 +1135,14 @@ InitCatalogRoot_HFSPlus(const hfsparams_t *dp, const HFSPlusVolumeHeader *header
 	ckp = (HFSPlusCatalogKey *)((UInt8 *)buffer + offset);
 	
 	/* Use CFString functions to get a HFSPlus Canonical name */
-	cfstr = CFStringCreateWithCString(kCFAllocatorDefault, dp->volumeName, kCFStringEncodingUTF8);
+	cfstr = CFStringCreateWithCString(kCFAllocatorDefault, (char *)dp->volumeName, kCFStringEncodingUTF8);
 	cfOK = _CFStringGetFileSystemRepresentation(cfstr, canonicalName, sizeof(canonicalName));
 
 	if (!cfOK || ConvertUTF8toUnicode(canonicalName, sizeof(ckp->nodeName.unicode),
 		ckp->nodeName.unicode, &ckp->nodeName.length)) {
 
 		/* On conversion errors "untitled" is used as a fallback. */
-		(void) ConvertUTF8toUnicode(kDefaultVolumeNameStr,
+		(void) ConvertUTF8toUnicode((UInt8 *)kDefaultVolumeNameStr,
 									sizeof(ckp->nodeName.unicode),
 									ckp->nodeName.unicode,
 									&ckp->nodeName.length);
@@ -1151,6 +1160,10 @@ InitCatalogRoot_HFSPlus(const hfsparams_t *dp, const HFSPlusVolumeHeader *header
 
 	cdp = (HFSPlusCatalogFolder *)((UInt8 *)buffer + offset);
 	cdp->recordType		= SWAP_BE16 (kHFSPlusFolderRecord);
+	/* folder count is only supported on HFSX volumes */
+	if (dp->flags & kMakeCaseSensitive) {
+		cdp->flags 		= SWAP_BE16 (kHFSHasFolderCountMask);
+	}
 	cdp->valence        = SWAP_BE32 (dp->journaledHFS ? 2 : 0);
 	cdp->folderID		= SWAP_BE32 (kHFSRootFolderID);
 	cdp->createDate		= SWAP_BE32 (dp->createDate);
@@ -1192,7 +1205,7 @@ InitCatalogRoot_HFSPlus(const hfsparams_t *dp, const HFSPlusVolumeHeader *header
 
 		/* File record #1 */
 		ckp = (HFSPlusCatalogKey *)((UInt8 *)buffer + offset);
-		(void) ConvertUTF8toUnicode(HFS_JOURNAL_FILE, sizeof(ckp->nodeName.unicode),
+		(void) ConvertUTF8toUnicode((UInt8 *)HFS_JOURNAL_FILE, sizeof(ckp->nodeName.unicode),
 		                            ckp->nodeName.unicode, &ckp->nodeName.length);
 		ckp->nodeName.length = SWAP_BE16 (ckp->nodeName.length);
 		uBytes1 = sizeof(UniChar) * SWAP_BE16 (ckp->nodeName.length);
@@ -1225,7 +1238,7 @@ InitCatalogRoot_HFSPlus(const hfsparams_t *dp, const HFSPlusVolumeHeader *header
 
 		/* File record #2 */
 		ckp = (HFSPlusCatalogKey *)((UInt8 *)buffer + offset);
-		(void) ConvertUTF8toUnicode(HFS_JOURNAL_INFO, sizeof(ckp->nodeName.unicode),
+		(void) ConvertUTF8toUnicode((UInt8 *)HFS_JOURNAL_INFO, sizeof(ckp->nodeName.unicode),
 		                            ckp->nodeName.unicode, &ckp->nodeName.length);
 		ckp->nodeName.length = SWAP_BE16 (ckp->nodeName.length);
 		uBytes2 = sizeof(UniChar) * SWAP_BE16 (ckp->nodeName.length);
@@ -1321,7 +1334,7 @@ InitFirstCatalogLeaf(const hfsparams_t *dp, void * buffer, int wrapper)
 	 * First record is always the root directory...
 	 */
 	ckp = (HFSCatalogKey *)((UInt8 *)buffer + offset);
-	ckp->nodeName[0]	= strlen(dp->volumeName);
+	ckp->nodeName[0]	= strlen((char *)dp->volumeName);
 	bcopy(dp->volumeName, &ckp->nodeName[1], ckp->nodeName[0]);
 	ckp->keyLength		= 1 + 4 + ((ckp->nodeName[0] + 2) & 0xFE);  /* pad to word */
 	ckp->parentID		= SWAP_BE32 (kHFSRootParentID);
@@ -1543,7 +1556,7 @@ InitCatalogRoot_HFS(const hfsparams_t *dp, void * buffer)
 	ckp = (HFSCatalogKey *)((UInt8 *)buffer + offset);
 	ckp->keyLength		= kHFSCatalogKeyMaximumLength;
 	ckp->parentID		= SWAP_BE32 (kHFSRootParentID);
-	ckp->nodeName[0]	= strlen(dp->volumeName);
+	ckp->nodeName[0]	= strlen((char *)dp->volumeName);
 	bcopy(dp->volumeName, &ckp->nodeName[1], ckp->nodeName[0]);
 	offset += ckp->keyLength + 1;
 
@@ -1772,66 +1785,113 @@ WriteMapNodes(const DriveInfo *driveInfo, UInt32 diskStart, UInt32 firstMapNode,
 }
 
 /*
- * ClearDisk
+ * @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+ * NOTE: IF buffer IS NULL, THIS FUNCTION WILL WRITE ZERO'S.
  *
- * Clear out consecutive sectors on the disk.
- *
+ * startingSector is in terms of 512-byte sectors.
+ * @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
  */
-static void
-ClearDisk(const DriveInfo *driveInfo, UInt64 startingSector, UInt32 numberOfSectors)
-{
-	UInt32 bufferSize;
-	UInt32 bufferSizeInSectors;
-	void *tempBuffer = NULL;
-
-
-	if ( numberOfSectors > driveInfo->sectorsPerIO )
-		bufferSizeInSectors = driveInfo->sectorsPerIO;
-	else
-		bufferSizeInSectors = numberOfSectors;
-
-	bufferSize = bufferSizeInSectors << kLog2SectorSize;
-
-	tempBuffer = valloc((size_t)bufferSize);
-	if (tempBuffer == NULL)
-		err(1, NULL);
-
-	bzero(tempBuffer, bufferSize);
-
-	while (numberOfSectors > 0) {
-		WriteBuffer(driveInfo, startingSector, bufferSize, tempBuffer);
-	
-		startingSector += bufferSizeInSectors;	
-		numberOfSectors -= bufferSizeInSectors;
-		
-		/* is remainder less than size of buffer? */
-		if (numberOfSectors < bufferSizeInSectors) {
-			bufferSizeInSectors = numberOfSectors;
-			bufferSize = bufferSizeInSectors << kLog2SectorSize;
-		}
-	}
-
-	if (tempBuffer)
-		free(tempBuffer);
-}
-
-
 static void
 WriteBuffer(const DriveInfo *driveInfo, UInt64 startingSector, UInt32 byteCount,
 	const void *buffer)
 {
 	off_t sector;
+	off_t physSector = 0;
+	off_t byteOffsetInPhysSector;
+	UInt32 numBytesToIO;
+	UInt32 numPhysSectorsToIO;
+	UInt32 tempbufSizeInPhysSectors;
+	UInt32 tempbufSize;
+	UInt32 fd = driveInfo->fd;
+	UInt32 physSectorSize = driveInfo->physSectorSize;
+	void *tempbuf = NULL;
+	int sectorSizeRatio = driveInfo->physSectorSize / kBytesPerSector;
+	int status = 0; /* 0: no error; 1: alloc; 2: read; 3: write */
 
-	if ((byteCount % driveInfo->sectorSize) != 0)
-		errx(1, "WriteBuffer: byte count %ld is not sector size multiple", byteCount);
+	if (0 == byteCount) {
+		goto exit;
+	}
 
+	/*@@@@@@@@@@ buffer allocation @@@@@@@@@@*/
+	/* try a buffer size for optimal IO, __UP TO 4MB__. if that
+	   fails, then try with the minimum allowed buffer size, which
+	   is equal to physSectorSize */
+	tempbufSizeInPhysSectors = MIN ( (byteCount - 1 + physSectorSize) / physSectorSize,
+					     driveInfo->physSectorsPerIO );
+	/* limit at 4MB */
+	tempbufSizeInPhysSectors = MIN ( tempbufSizeInPhysSectors, (4 * 1024 * 1024) / physSectorSize );
+	tempbufSize = tempbufSizeInPhysSectors * physSectorSize;
+
+	if ((tempbuf = valloc(tempbufSize)) == NULL) {
+		/* try allocation of smallest allowed size: one
+		   physical sector.
+		   NOTE: the previous valloc tempbufSize might have
+		   already been one physical sector. we don't want to
+		   check if that was the case, so just try again.
+		*/
+		tempbufSizeInPhysSectors = 1;
+		tempbufSize = physSectorSize;
+		if ((tempbuf = valloc(tempbufSize)) == NULL) {
+			status = 1;
+			goto exit;
+		}
+	}
+
+	/*@@@@@@@@@@ io @@@@@@@@@@*/
 	sector = driveInfo->sectorOffset + startingSector;
+	physSector = sector / sectorSizeRatio;
+	byteOffsetInPhysSector =  (sector % sectorSizeRatio) * kBytesPerSector;
 
-	if (lseek(driveInfo->fd, sector * driveInfo->sectorSize, SEEK_SET) < 0)
-		err(1, "seek (sector %qd)", sector);
+	while (byteCount > 0) {
+		numPhysSectorsToIO = MIN ( (byteCount - 1 + physSectorSize) / physSectorSize,
+				       tempbufSizeInPhysSectors );
+		numBytesToIO = MIN(byteCount, (numPhysSectorsToIO * physSectorSize) - byteOffsetInPhysSector);
 
-	if (write(driveInfo->fd, buffer, byteCount) != byteCount)
-		err(1, "write (sector %qd, %ld bytes)", sector, byteCount);
+		/* if IO does not align with physical sector boundaries */
+		if ((0 != byteOffsetInPhysSector) || ((numBytesToIO % physSectorSize) != 0)) {
+			if (pread(fd, tempbuf, numPhysSectorsToIO * physSectorSize, physSector * physSectorSize) < 0) {
+				status = 2;
+				goto exit;
+			}
+		}
+
+		if (NULL != buffer) {
+			memcpy(tempbuf + byteOffsetInPhysSector, buffer, numBytesToIO);
+		}
+		else {
+			bzero(tempbuf + byteOffsetInPhysSector, numBytesToIO);
+		}
+
+		if (pwrite(fd, tempbuf, numPhysSectorsToIO * physSectorSize, physSector * physSectorSize) < 0) {
+			status = 3;
+			goto exit;
+		}
+
+		byteOffsetInPhysSector = 0;
+		byteCount -= numBytesToIO;
+		physSector += numPhysSectorsToIO;
+		if (NULL != buffer) {
+			buffer += numBytesToIO;
+		}
+	}
+
+exit:
+	if (tempbuf) {
+		free(tempbuf);
+		tempbuf = NULL;
+	}
+
+	if (1 == status) {
+		err(1, NULL);
+	}
+	else if (2 == status) {
+		err(1, "read (sector %llu)", physSector);
+	}
+	else if (3 == status) {
+		err(1, "write (sector %llu)", physSector);
+	}
+
+	return;
 }
 
 
@@ -2006,7 +2066,7 @@ ConvertUTF8toUnicode(const UInt8* source, UInt32 bufsize, UniChar* unibuf,
  * Derive the encoding hint for the given name.
  */
 static int
-getencodinghint(char *name)
+getencodinghint(unsigned char *name)
 {
         int mib[3];
         size_t buflen = sizeof(int);
@@ -2020,7 +2080,7 @@ getencodinghint(char *name)
         mib[1] = vfc.vfc_typenum;
         mib[2] = HFS_ENCODINGHINT;
  
-	if (sysctl(mib, 3, &hint, &buflen, name, strlen(name) + 1) < 0)
+	if (sysctl(mib, 3, &hint, &buflen, name, strlen((char *)name) + 1) < 0)
  		goto error;
 	return (hint);
 error:

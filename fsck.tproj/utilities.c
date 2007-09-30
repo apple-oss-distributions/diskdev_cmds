@@ -557,7 +557,7 @@ getpathname(namebuf, curdir, ino)
 		cp -= len;
 		memmove(cp, namebuf, (size_t)len);
 		*--cp = '/';
-		if (cp < &namebuf[MAXNAMLEN])
+		if (cp < &namebuf[UFSMAXNAMLEN])
 			break;
 		ino = idesc.id_number;
 	}
@@ -585,7 +585,7 @@ void
 catchquit(sig)
 	int sig;
 {
-	extern returntosingle;
+	extern int returntosingle;
 
 	printf("returning to single-user after filesystem check\n");
 	returntosingle = 1;

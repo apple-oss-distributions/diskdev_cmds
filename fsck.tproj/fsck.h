@@ -260,6 +260,7 @@ extern struct	dinode zino;
 #ifdef __APPLE__			/* define qflag exit codes */
 #define CLEANEXIT  0		/* Filesystem Clean, no checks */
 #define DIRTYEXIT  3		/* Filesystem Dirty, no checks */
+#define	CANTFIXIT  5		/* Filesystem can't be fixed */
 #endif /* __APPLE__ */
 
 struct fstab;
@@ -279,7 +280,7 @@ void		catchquit __P((int));
 int		changeino __P((ino_t dir, char *name, ino_t newnum));
 int		checkfstab __P((int preen, int maxrun,
 			int (*docheck)(struct fstab *),
-			int (*chkit)(char *, char *, long, int)));
+			int (*chkit)(char *, char *, char *, int)));
 int		chkrange __P((ufs_daddr_t blk, int cnt));
 void		ckfini __P((int markclean));
 int		ckinode __P((struct dinode *dp, struct inodesc *));

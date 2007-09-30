@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 1999, 2005 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
@@ -75,6 +75,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <limits.h>
 
 #include <machine/endian.h>
 
@@ -166,7 +167,7 @@ extractdirs(genmode)
 	struct direct nulldir;
 
 	vprintf(stdout, "Extract directories from tape\n");
-	(void) sprintf(dirfile, "%s/rstdir%d", _PATH_TMP, dumpdate);
+	(void) sprintf(dirfile, "%s/rstdir%ld", _PATH_TMP, dumpdate);
 	df = fopen(dirfile, "w");
 	if (df == NULL) {
 		fprintf(stderr,
@@ -176,7 +177,7 @@ extractdirs(genmode)
 		done(1);
 	}
 	if (genmode != 0) {
-		(void) sprintf(modefile, "%s/rstmode%d", _PATH_TMP, dumpdate);
+		(void) sprintf(modefile, "%s/rstmode%ld", _PATH_TMP, dumpdate);
 		mf = fopen(modefile, "w");
 		if (mf == NULL) {
 			fprintf(stderr,
@@ -222,8 +223,7 @@ extractdirs(genmode)
 void
 skipdirs()
 {
-
-	while ((curfile.dip->di_mode & IFMT) == IFDIR) {
+	while ((curfile.dip && curfile.dip->di_mode & IFMT) == IFDIR) {
 		skipfile();
 	}
 }
@@ -312,7 +312,7 @@ pathsearch(pathname)
 	while (*path == '/')
 		path++;
 	dp = NULL;
-	while ((name = strsep(&path, "/")) != NULL && *name != NULL) {
+	while ((name = strsep(&path, "/")) != NULL && *name != '\0') {
 		if ((dp = searchdir(ino, name)) == NULL)
 			return (NULL);
 		ino = dp->d_ino;
@@ -385,20 +385,15 @@ putdir(buf, size)
 			i = DIRBLKSIZ - (loc & (DIRBLKSIZ - 1));
 			if ((dp->d_reclen & 0x3) != 0 ||
 			    dp->d_reclen > i ||
-			    dp->d_reclen < DIRSIZ(0, dp) ||
-			    dp->d_namlen > NAME_MAX) {
+			    dp->d_reclen < DIRSIZ(0, dp)) {
 				vprintf(stdout, "Mangled directory: ");
 				if ((dp->d_reclen & 0x3) != 0)
 					vprintf(stdout,
 					   "reclen not multiple of 4 ");
 				if (dp->d_reclen < DIRSIZ(0, dp))
 					vprintf(stdout,
-					   "reclen less than DIRSIZ (%d < %d) ",
+					   "reclen less than DIRSIZ (%d < %lu) ",
 					   dp->d_reclen, DIRSIZ(0, dp));
-				if (dp->d_namlen > NAME_MAX)
-					vprintf(stdout,
-					   "reclen name too big (%d > %d) ",
-					   dp->d_namlen, NAME_MAX);
 				vprintf(stdout, "\n");
 				loc += i;
 				continue;
@@ -480,7 +475,7 @@ rst_seekdir(dirp, loc, base)
 		return;
 	loc -= base;
 	if (loc < 0)
-		fprintf(stderr, "bad seek pointer to rst_seekdir %d\n", loc);
+		fprintf(stderr, "bad seek pointer to rst_seekdir %ld\n", loc);
 	(void) lseek(dirp->dd_fd, base + (loc & ~(DIRBLKSIZ - 1)), SEEK_SET);
 	dirp->dd_loc = loc & (DIRBLKSIZ - 1);
 	if (dirp->dd_loc != 0)
@@ -606,7 +601,7 @@ setdirmodes(flags)
 	char *cp;
 	
 	vprintf(stdout, "Set directory mode, owner, and times.\n");
-	(void) sprintf(modefile, "%s/rstmode%d", _PATH_TMP, dumpdate);
+	(void) sprintf(modefile, "%s/rstmode%ld", _PATH_TMP, dumpdate);
 	mf = fopen(modefile, "r");
 	if (mf == NULL) {
 		fprintf(stderr, "fopen: %s\n", strerror(errno));

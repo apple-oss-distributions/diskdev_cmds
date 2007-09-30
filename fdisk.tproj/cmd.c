@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2002 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2002-2005 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  *
@@ -369,12 +369,21 @@ Xwrite(cmd, disk, mbr, tt, offset)
 	int offset;
 {
 	int fd;
+	int shared = 0;
+
+	fd = DISK_openshared(disk->name, O_RDWR, &shared);
+	if(shared) {
+	  if(!ask_yn("Device could not be accessed exclusively.\nA reboot will be needed for changes to take effect. OK?", 0)) {
+	    close(fd);
+	    printf("MBR unchanged\n");
+	    return (CMD_CONT);
+	  }
+	}
 
 	printf("Writing MBR at offset %d.\n", offset);
 
-	fd = DISK_open(disk->name, O_RDWR);
 	MBR_make(mbr);
-	MBR_write(fd, mbr);
+	MBR_write(disk, fd, mbr);
 	close(fd);
 	return (CMD_CLEAN);
 }
@@ -494,21 +503,6 @@ Xmanual(cmd, disk, mbr, tt, offset)
 	mbr_t *tt;
 	int offset;
 {
-	char *pager = "/usr/bin/less";
-	char *p;
-	sig_t opipe;
-	extern char manpage[];
-	FILE *f;
-
-	opipe = signal(SIGPIPE, SIG_IGN);
-	if ((p = getenv("PAGER")) != NULL && (*p != '\0'))
-		pager = p;
-	f = popen(pager, "w");
-	if (f) {
-		(void) fwrite(manpage, strlen(manpage), 1, f);
-		pclose(f);
-	}
-
-	(void)signal(SIGPIPE, opipe);
+	system("man 8 fdisk");
 	return (CMD_CONT);
 }

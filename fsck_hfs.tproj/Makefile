@@ -12,9 +12,9 @@ NAME = fsck_hfs
 PROJECTVERSION = 2.8
 PROJECT_TYPE = Tool
 
-HFILES = fsck_hfs.h cache.h
+HFILES = fsck_hfs.h cache.h fsck_debug.h
 
-CFILES = fsck_hfs.c strings.c utilities.c cache.c
+CFILES = fsck_hfs.c strings.c utilities.c cache.c fsck_debug.c
 
 SUBPROJECTS = dfalib
 
@@ -33,7 +33,7 @@ PROF_LIBS = $(LIBS)
 
 
 HEADER_PATHS = -Idfalib
-NEXTSTEP_PB_CFLAGS = 
+NEXTSTEP_PB_CFLAGS = -Wall -Werror
 
 
 NEXTSTEP_BUILD_OUTPUT_DIR = /tmp/BUILD

@@ -60,9 +60,9 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+
 #ifdef sunos
 #include <sys/vnode.h>
-
 #include <ufs/inode.h>
 #else
 #include <ufs/ufs/dinode.h>
@@ -79,6 +79,8 @@
 #include <pwd.h>
 #include <signal.h>
 #include <stdio.h>
+#include <errno.h>
+
 #ifdef __STDC__
 #include <stdlib.h>
 #include <string.h>
@@ -206,7 +208,7 @@ rmtopen(tape, mode)
 {
 	char buf[256];
 
-	(void)sprintf(buf, "O%s\n%d\n", tape, mode);
+	(void)snprintf(buf, sizeof(buf), "O%s\n%d\n", tape, mode);
 	rmtstate = TS_OPEN;
 	return (rmtcall(tape, buf));
 }
@@ -228,7 +230,6 @@ rmtread(buf, count)
 {
 	char line[30];
 	int n, i, cc;
-	extern errno;
 
 	(void)sprintf(line, "R%d\n", count);
 	n = rmtcall("read", line);

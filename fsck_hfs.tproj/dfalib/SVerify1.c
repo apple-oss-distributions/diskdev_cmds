@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999-2003 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 1999-2007 Apple Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
@@ -33,6 +33,7 @@
 */
 
 #include "Scavenger.h"
+#include "../cache.h"
 
 //	internal routine prototypes
 
@@ -44,20 +45,45 @@ static	OSErr	RcdMDBEmbededVolDescriptionErr( SGlobPtr GPtr, OSErr type, HFSMaste
 
 static	OSErr	CheckNodesFirstOffset( SGlobPtr GPtr, BTreeControlBlock *btcb );
 
-static	Boolean	ExtentInfoExists( ExtentsTable **extentsTableH, ExtentInfo *extentInfo );
-
 static OSErr	ScavengeVolumeType( SGlobPtr GPtr, HFSMasterDirectoryBlock *mdb, UInt32 *volumeType );
 static OSErr	SeekVolumeHeader( SGlobPtr GPtr, UInt64 startSector, UInt32 numSectors, UInt64 *vHSector );
+
+/* overlapping extents verification functions prototype */
+static OSErr	AddExtentToOverlapList( SGlobPtr GPtr, HFSCatalogNodeID fileNumber, const char *attrName, UInt32 extentStartBlock, UInt32 extentBlockCount, UInt8 forkType );
+
+static	Boolean	ExtentInfoExists( ExtentsTable **extentsTableH, ExtentInfo *extentInfo);
+
+static void CheckHFSPlusExtentRecords(SGlobPtr GPtr, UInt32 fileID, const char *attrname, HFSPlusExtentRecord extent, UInt8 forkType); 
+
+static void CheckHFSExtentRecords(SGlobPtr GPtr, UInt32 fileID, HFSExtentRecord extent, UInt8 forkType);
+
+static Boolean DoesOverlap(SGlobPtr GPtr, UInt32 fileID, const char *attrname, UInt32 startBlock, UInt32 blockCount, UInt8 forkType); 
+
+static int CompareExtentFileID(const void *first, const void *second);
 
 /*
  * Check if a volume is journaled.  
  *
- * returns:    	0 not journaled
+ * If journal_bit_only is true, the function only checks 
+ * if kHFSVolumeJournaledBit is set or not.  If the bit 
+ * is set, function returns 1 otherwise 0.
+ *
+ * If journal_bit_only is false, in addition to checking
+ * kHFSVolumeJournaledBit, the function also checks if the 
+ * last mounted version indicates failed journal replay, 
+ * or runtime corruption was detected or simply the volume 
+ * is not journaled and it was not unmounted cleanly.  
+ * If all of the above conditions are false and the journal
+ * bit is set, function returns 1 to indicate that the 
+ * volume is journaled truly otherwise returns 1 to fake
+ * that volume is not journaled.
+ *
+ * returns:    	0 not journaled or any of the above conditions are true
  *		1 journaled
  *
  */
 int
-CheckIfJournaled(SGlobPtr GPtr)
+CheckIfJournaled(SGlobPtr GPtr, Boolean journal_bit_only)
 {
 #define kIDSector 2
 
@@ -103,13 +129,17 @@ CheckIfJournaled(SGlobPtr GPtr)
 
 	if ((vhp != NULL) && (ValidVolumeHeader(vhp) == noErr)) {
 		result = ((vhp->attributes & kHFSVolumeJournaledMask) != 0);
+		if (journal_bit_only == true) {
+			goto out;
+		}
 
 		// even if journaling is enabled for this volume, we'll return
 		// false if it wasn't unmounted cleanly and it was previously
 		// mounted by someone that doesn't know about journaling.
 		// or if lastMountedVersion is kFSKMountVersion
 		if ( vhp->lastMountedVersion == kFSKMountVersion || 
-			((vhp->lastMountedVersion != kHFSJMountVersion) && 
+			(vhp->attributes & kHFSVolumeInconsistentMask) ||
+			((vhp->lastMountedVersion != kHFSJMountVersion) &&
 			(vhp->attributes & kHFSVolumeUnmountedMask) == 0)) {
 			result = 0;
 		}
@@ -117,101 +147,162 @@ CheckIfJournaled(SGlobPtr GPtr)
 		result = 0;
 	}
 
+out:
 	(void) ReleaseVolumeBlock(vcb, &block, rbOptions);
 
 	return (result);
 }
 
 /*
- * Check if a volume is clean (unmounted safely)
+ * The functions checks whether the volume is clean or dirty.  It 
+ * also marks the volume as clean/dirty depending on the type 
+ * of operation specified.  It modifies the volume header only 
+ * if the old values are not same as the new values.  If the volume 
+ * header is updated, it also sets the last mounted version for HFS+.
+ * 
+ * Input:
+ * GPtr		- Pointer to scavenger global area
+ * operation	- Type of operation to perform
+ * 			kCheckVolume,		// check if volume is clean/dirty
+ *			kMarkVolumeDirty,	// mark the volume dirty
+ *			kMarkVolumeClean	// mark the volume clean
  *
- * returns:    -1 not an HFS/HFS+ volume
- *		0 dirty
- *		1 clean
- *
- * if markClean is true and the volume is dirty it
- * will be marked clean on disk.
+ * Output:
+ * modified 	- true if the VH/MDB was modified, otherwise false.
+ * Return Value - 	
+ *			-1 - if the volume is not an HFS/HFS+ volume
+ *	 		 0 - if the volume was dirty or marked dirty
+ *	 		 1 - if the volume was clean or marked clean
+ * If the operation requested was to mark the volume clean/dirty,
+ * the return value is dependent on type of operation (described above).
  */
-int
-CheckForClean(SGlobPtr GPtr, Boolean markClean)
+int CheckForClean(SGlobPtr GPtr, UInt8 operation, Boolean *modified)
 {
-	OSErr err;
-	int result = -1;
+	enum { unknownVolume = -1, cleanUnmount = 1, dirtyUnmount = 0};
+	int result = unknownVolume;
+	Boolean update = false;
 	HFSMasterDirectoryBlock	*mdbp;
 	HFSPlusVolumeHeader *vhp;
-	SVCB *vcb = GPtr->calculatedVCB;
-	VolumeObjectPtr myVOPtr;
-	ReleaseBlockOptions rbOptions;
-	UInt64			blockNum;
 	BlockDescriptor block;
-
-	vhp = (HFSPlusVolumeHeader *) NULL;
-	rbOptions = kReleaseBlock;
-	myVOPtr = GetVolumeObjectPtr( );
-	block.buffer = NULL;
+	ReleaseBlockOptions rbOptions;
+	UInt64 blockNum;
+	SVCB *vcb;
 	
-	GetVolumeObjectBlockNum( &blockNum );
-	if ( blockNum == 0 ) {
-		if ( GPtr->logLevel >= kDebugLog )
-			printf( "\t%s - unknown volume type \n", __FUNCTION__ );
-		return (-1);
+	*modified = false;
+	vcb = GPtr->calculatedVCB;
+	block.buffer = NULL;
+	rbOptions = kReleaseBlock;
+	
+	/* Get the block number for VH/MDB */
+	GetVolumeObjectBlockNum(&blockNum);
+	if (blockNum == 0) {
+		if (GPtr->logLevel >= kDebugLog)
+		plog( "\t%s - unknown volume type \n", __FUNCTION__ );
+		goto ExitThisRoutine;
 	}
 	
-	// get the VHB or MDB (depending on type of volume)
-	err = GetVolumeObjectPrimaryBlock( &block );
-	if (err) {
+	/* Get VH or MDB depending on the type of volume */
+	result = GetVolumeObjectPrimaryBlock(&block);
+	if (result) {
 		if ( GPtr->logLevel >= kDebugLog )
-			printf( "\t%s - could not get VHB/MDB at block %qd \n", __FUNCTION__, blockNum );
-		err = -1;
+		plog( "\t%s - could not get VHB/MDB at block %qd \n", __FUNCTION__, blockNum );
+		result = unknownVolume;
 		goto ExitThisRoutine;
 	}
 
-	if ( VolumeObjectIsHFSPlus( ) ) {
+	result = cleanUnmount;
+
+	if (VolumeObjectIsHFSPlus()) {
 		vhp = (HFSPlusVolumeHeader *) block.buffer;
 		
-		result = 1;  // clean unmount
-		if ( ((vhp->attributes & kHFSVolumeUnmountedMask) == 0) )
-			result = 0;  // dirty unmount
+		/* Check unmount bit and volume inconsistent bit */
+		if (((vhp->attributes & kHFSVolumeUnmountedMask) == 0) || 
+		    (vhp->attributes & kHFSVolumeInconsistentMask))
+			result = dirtyUnmount;
 
-		// if we are to mark volume clean and lastMountedVersion shows journaled we invalidate
-		// the journal by setting lastMountedVersion to 'fsck'
-		if ( markClean && ((vhp->lastMountedVersion == kHFSJMountVersion) || 
-						   (vhp->lastMountedVersion == kFSKMountVersion)) ) {
-			result = 0;  // force dirty unmount path
-			vhp->lastMountedVersion = kFSCKMountVersion;
-		}
-		
+		/* Check last mounted version.  If kFSKMountVersion, bad 
+		 * journal was encountered during mount.  Force dirty volume.
+		 */
+
 		if (vhp->lastMountedVersion == kFSKMountVersion) {
 			GPtr->JStat |= S_BadJournal;
-			if ( GPtr->logLevel >= kDebugLog ) 
-				printf ("\t%s - found bad journal signature \n", __FUNCTION__);
-			/* XXX This is not correct error code for bad journal.  
-			 * E_InvalidVolumeHeader is negative error.  Change ErrCode
-			 * to non-negative, else it might indicate non-fixable error
-			 * in scavenge process 
-			 */
-			RcdError (GPtr, E_InvalidVolumeHeader);
-			GPtr->ErrCode = -E_InvalidVolumeHeader;
-			result = 0;	//dirty unmount
+			RcdError (GPtr, E_BadJournal);
+			result = dirtyUnmount;
 		}
-		
-		if ( markClean && (result == 0) ) {
-			vhp->attributes |= kHFSVolumeUnmountedMask;
-			rbOptions = kForceWriteBlock;
+
+		if (operation == kMarkVolumeDirty) {
+			/* Mark volume was not unmounted cleanly */
+			if (vhp->attributes & kHFSVolumeUnmountedMask) {
+				vhp->attributes &= ~kHFSVolumeUnmountedMask;
+				update = true;
+			} 
+			/* Mark volume inconsistent */
+			if ((vhp->attributes & kHFSVolumeInconsistentMask) == 0) {
+				vhp->attributes |= kHFSVolumeInconsistentMask;
+				update = true;
+			}
+		} else if (operation == kMarkVolumeClean) {
+			/* Mark volume was unmounted cleanly */
+			if ((vhp->attributes & kHFSVolumeUnmountedMask) == 0)  {
+				vhp->attributes |= kHFSVolumeUnmountedMask;
+				update = true;
+			} 
+			/* Mark volume consistent */
+			if (vhp->attributes & kHFSVolumeInconsistentMask) {
+				vhp->attributes &= ~kHFSVolumeInconsistentMask;
+				update = true;
+			}
 		}
-	}
-	else if ( VolumeObjectIsHFS( ) ) {
+
+		/* If any changes to VH, update the last mounted version */
+		if (update == true) {
+			vhp->lastMountedVersion = kFSCKMountVersion;
+		}
+	} else if (VolumeObjectIsHFS()) {
 		mdbp = (HFSMasterDirectoryBlock	*) block.buffer;
 		
-		result = (mdbp->drAtrb & kHFSVolumeUnmountedMask) != 0;
-		if (markClean && (result == 0)) {
-			mdbp->drAtrb |= kHFSVolumeUnmountedMask;
-			rbOptions = kForceWriteBlock;
+		/* Check unmount bit and volume inconsistent bit */
+		if (((mdbp->drAtrb & kHFSVolumeUnmountedMask) == 0) || 
+		    (mdbp->drAtrb & kHFSVolumeInconsistentMask))
+			result = dirtyUnmount;
+
+		if (operation == kMarkVolumeDirty) {
+			/* Mark volume was not unmounted cleanly */
+			if (mdbp->drAtrb & kHFSVolumeUnmountedMask) {
+				mdbp->drAtrb &= ~kHFSVolumeUnmountedMask;
+				update = true;
+			} 
+			/* Mark volume inconsistent */
+			if ((mdbp->drAtrb & kHFSVolumeInconsistentMask) == 0) {
+				mdbp->drAtrb |= kHFSVolumeInconsistentMask;
+				update = true;
+			}
+		} else if (operation == kMarkVolumeClean) {
+			/* Mark volume was unmounted cleanly */
+			if ((mdbp->drAtrb & kHFSVolumeUnmountedMask) == 0)  {
+				mdbp->drAtrb |= kHFSVolumeUnmountedMask;
+				update = true;
+			} 
+			/* Mark volume consistent */
+			if (mdbp->drAtrb & kHFSVolumeInconsistentMask) {
+				mdbp->drAtrb &= ~kHFSVolumeInconsistentMask;
+				update = true;
+			}
 		}
 	}
 
 ExitThisRoutine:
-	if ( block.buffer != NULL )
+	if (update == true) {
+		*modified = true;
+		rbOptions = kForceWriteBlock;
+		/* Set appropriate return value */
+		if (operation == kMarkVolumeDirty) {
+			result = dirtyUnmount;
+		} else if (operation == kMarkVolumeClean) {
+			result = cleanUnmount;
+		}
+	}
+	if (block.buffer != NULL)
 		(void) ReleaseVolumeBlock(vcb, &block, rbOptions);
 
 	return (result);
@@ -263,7 +354,7 @@ OSErr IVChk( SGlobPtr GPtr )
 	// check volume size
 	if ( myVOPtr->totalDeviceSectors < 3 ) {
 		if ( GPtr->logLevel >= kDebugLog )
-			printf("\tinvalid device information for volume - total sectors = %qd sector size = %d \n",
+		plog("\tinvalid device information for volume - total sectors = %qd sector size = %d \n",
 				myVOPtr->totalDeviceSectors, myVOPtr->sectorSize);
 		return( 123 );
 	}
@@ -271,7 +362,7 @@ OSErr IVChk( SGlobPtr GPtr )
 	GetVolumeObjectBlockNum( &blockNum );
 	if ( blockNum == 0 || myVOPtr->volumeType == kUnknownVolumeType ) {
 		if ( GPtr->logLevel >= kDebugLog )
-			printf( "\t%s - unknown volume type \n", __FUNCTION__ );
+		plog( "\t%s - unknown volume type \n", __FUNCTION__ );
 		err = R_BadSig;  /* doesn't bear the HFS signature */
 		goto ReleaseAndBail;
 	}
@@ -280,7 +371,7 @@ OSErr IVChk( SGlobPtr GPtr )
 	err = GetVolumeObjectVHBorMDB( &myBlockDescriptor );
 	if ( err != noErr ) {
 		if ( GPtr->logLevel >= kDebugLog )
-			printf( "\t%s - bad volume header - err %d \n", __FUNCTION__, err );
+		plog( "\t%s - bad volume header - err %d \n", __FUNCTION__, err );
 		goto ReleaseAndBail;
 	}
 	myMDBPtr = (HFSMasterDirectoryBlock	*) myBlockDescriptor.buffer;
@@ -306,7 +397,7 @@ OSErr IVChk( SGlobPtr GPtr )
 			err = GetVolumeObjectVHB( &myBlockDescriptor );
 			if ( err != noErr ) {
 				if ( GPtr->logLevel >= kDebugLog )
-					printf( "\t%s - bad volume header - err %d \n", __FUNCTION__, err );
+				plog( "\t%s - bad volume header - err %d \n", __FUNCTION__, err );
 				WriteError( GPtr, E_InvalidVolumeHeader, 1, 0 );
 				err = E_InvalidVolumeHeader;
 				goto ReleaseAndBail;
@@ -316,7 +407,7 @@ OSErr IVChk( SGlobPtr GPtr )
 		}
 		else {
 			if ( GPtr->logLevel >= kDebugLog )
-				printf( "\t%s - bad volume header - err %d \n", __FUNCTION__, err );
+			plog( "\t%s - bad volume header - err %d \n", __FUNCTION__, err );
 			WriteError( GPtr, E_InvalidVolumeHeader, 1, 0 );
 			err = E_InvalidVolumeHeader;
 			goto ReleaseAndBail;
@@ -329,7 +420,11 @@ OSErr IVChk( SGlobPtr GPtr )
 	if ( VolumeObjectIsHFSPlus( ) ) {
 
 		myVHBPtr = (HFSPlusVolumeHeader	*) myBlockDescriptor.buffer;
-		WriteMsg( GPtr, M_CheckingHFSPlusVolume, kStatusMessage );
+		if (myVHBPtr->attributes & kHFSVolumeJournaledMask) {
+			WriteMsg( GPtr, M_CheckingJnlHFSPlusVolume, kStatusMessage );
+		} else {
+			WriteMsg( GPtr, M_CheckingNoJnlHFSPlusVolume, kStatusMessage );
+		}
 		GPtr->numExtents = kHFSPlusExtentDensity;
 		vcb->vcbSignature = kHFSPlusSigWord;
 
@@ -357,8 +452,8 @@ OSErr IVChk( SGlobPtr GPtr )
 			RcdError( GPtr, E_NABlks );
 			err = E_NABlks;					
 			if ( GPtr->logLevel >= kDebugLog ) {
-				printf( "\t%s - volume header total allocation blocks is greater than device size \n", __FUNCTION__ );
-				printf( "\tvolume allocation block count %d device allocation block count %d \n", 
+			plog( "\t%s - volume header total allocation blocks is greater than device size \n", __FUNCTION__ );
+			plog( "\tvolume allocation block count %d device allocation block count %d \n", 
 						myVHBPtr->totalBlocks, numABlks );
 			}
 			goto ReleaseAndBail;
@@ -667,7 +762,7 @@ OSErr	CreateExtentsBTreeControlBlock( SGlobPtr GPtr )
 	
 		CopyMemory(volumeHeader->extentsFile.extents, GPtr->calculatedExtentsFCB->fcbExtents32, sizeof(HFSPlusExtentRecord) );
 		
-		err = CheckFileExtents( GPtr, kHFSExtentsFileID, 0, (void *)GPtr->calculatedExtentsFCB->fcbExtents32, &numABlks );	//	check out extent info
+		err = CheckFileExtents( GPtr, kHFSExtentsFileID, kDataFork, NULL, (void *)GPtr->calculatedExtentsFCB->fcbExtents32, &numABlks);	//	check out extent info
 
 		if (err) goto exit;
 
@@ -729,7 +824,7 @@ OSErr	CreateExtentsBTreeControlBlock( SGlobPtr GPtr )
 	//	ExtDataRecToExtents(alternateMDB->drXTExtRec, GPtr->calculatedExtentsFCB->fcbExtents);
 
 		
-		err = CheckFileExtents( GPtr, kHFSExtentsFileID, 0, (void *)GPtr->calculatedExtentsFCB->fcbExtents16, &numABlks );	/* check out extent info */	
+		err = CheckFileExtents( GPtr, kHFSExtentsFileID, kDataFork, NULL, (void *)GPtr->calculatedExtentsFCB->fcbExtents16, &numABlks);	/* check out extent info */	
 		if (err) goto exit;
 	
 		if (alternateMDB->drXTFlSize != ((UInt64)numABlks * (UInt64)GPtr->calculatedVCB->vcbBlockSize))//	check out the PEOF
@@ -897,18 +992,29 @@ OSErr ExtBTChk( SGlobPtr GPtr )
 
 /*------------------------------------------------------------------------------
 
-Function:	ExtFlChk - (Extent File Check)
+Function:	BadBlockFileExtentCheck - (Check extents of bad block file)
 
-Function:	Verifies the extent file structure.
+Function:	
+		Verifies the extents of bad block file (kHFSBadBlockFileID) that 
+		exist in extents Btree.
+
+		Note that the extents for other file IDs < kHFSFirstUserCatalogNodeID 
+		are being taken care in the following functions:
+
+		kHFSExtentsFileID    	- CreateExtentsBTreeControlBlock 
+		kHFSCatalogFileID     	- CreateCatalogBTreeControlBlock
+		kHFSAllocationFileID	- CreateExtendedAllocationsFCB
+		kHFSStartupFileID     	- CreateExtendedAllocationsFCB
+		kHFSAttributesFileID	- CreateAttributesBTreeControlBlock
 			
 Input:		GPtr		-	pointer to scavenger global area
 
-Output:		ExtFlChk		-	function result:			
-								0	= no error
-								+n 	= error code
+Output:		BadBlockFileExtentCheck		-	function result:			
+				0	= no error
+				+n 	= error code
 ------------------------------------------------------------------------------*/
 
-OSErr ExtFlChk( SGlobPtr GPtr )
+OSErr BadBlockFileExtentCheck( SGlobPtr GPtr )
 {
 	UInt32			attributes;
 	void			*p;
@@ -938,7 +1044,7 @@ OSErr ExtFlChk( SGlobPtr GPtr )
 		UInt32					numBadBlocks;
 		
 		ClearMemory ( zeroXdr, sizeof( HFSPlusExtentRecord ) );
-		result = CheckFileExtents( GPtr, kHFSBadBlockFileID, 0, (void *)zeroXdr, &numBadBlocks );	//	check and mark bitmap
+		result = CheckFileExtents( GPtr, kHFSBadBlockFileID, kDataFork, NULL, (void *)zeroXdr, &numBadBlocks);	//	check and mark bitmap
 	}
 
 ExitThisRoutine:
@@ -992,7 +1098,7 @@ OSErr	CreateCatalogBTreeControlBlock( SGlobPtr GPtr )
 
 		CopyMemory(volumeHeader->catalogFile.extents, GPtr->calculatedCatalogFCB->fcbExtents32, sizeof(HFSPlusExtentRecord) );
 
-		err = CheckFileExtents( GPtr, kHFSCatalogFileID, 0, (void *)GPtr->calculatedCatalogFCB->fcbExtents32, &numABlks );	
+		err = CheckFileExtents( GPtr, kHFSCatalogFileID, kDataFork, NULL, (void *)GPtr->calculatedCatalogFCB->fcbExtents32, &numABlks);	
 		if (err) goto exit;
 
 		if ( volumeHeader->catalogFile.totalBlocks != numABlks )
@@ -1069,7 +1175,7 @@ OSErr	CreateCatalogBTreeControlBlock( SGlobPtr GPtr )
 		CopyMemory( alternateMDB->drCTExtRec, GPtr->calculatedCatalogFCB->fcbExtents16, sizeof(HFSExtentRecord) );
 	//	ExtDataRecToExtents(alternateMDB->drCTExtRec, GPtr->calculatedCatalogFCB->fcbExtents);
 
-		err = CheckFileExtents( GPtr, kHFSCatalogFileID, 0, (void *)GPtr->calculatedCatalogFCB->fcbExtents16, &numABlks );	/* check out extent info */	
+		err = CheckFileExtents( GPtr, kHFSCatalogFileID, kDataFork, NULL, (void *)GPtr->calculatedCatalogFCB->fcbExtents16, &numABlks);	/* check out extent info */	
 		if (err) goto exit;
 
 		if (alternateMDB->drCTFlSize != ((UInt64)numABlks * (UInt64)vcb->vcbBlockSize))	//	check out the PEOF
@@ -1109,7 +1215,7 @@ OSErr	CreateCatalogBTreeControlBlock( SGlobPtr GPtr )
 		if (err) goto exit;
 	}
 #if 0	
-	printf("   Catalog B-tree is %qd bytes\n", (UInt64)btcb->totalNodes * (UInt64) btcb->nodeSize);
+plog("   Catalog B-tree is %qd bytes\n", (UInt64)btcb->totalNodes * (UInt64) btcb->nodeSize);
 #endif
 
 	if ( header.btreeType != kHFSBTreeType )
@@ -1152,7 +1258,7 @@ OSErr	CreateCatalogBTreeControlBlock( SGlobPtr GPtr )
                 HFSPlusCatalogThread *		recPtr = &record.hfsPlusThread;
                 (void) utf_encodestr( recPtr->nodeName.unicode,
                                       recPtr->nodeName.length * 2,
-                                      GPtr->volumeName, &len );
+                                      GPtr->volumeName, &len, sizeof(GPtr->volumeName) );
                 GPtr->volumeName[len] = '\0';
             }
             else {
@@ -1176,7 +1282,8 @@ ExitThisRoutine:
 
 Function:	CreateExtendedAllocationsFCB
 
-Function:	Create the calculated ExtentsBTree Control Block
+Function:	Create the calculated ExtentsBTree Control Block for
+			kHFSAllocationFileID and kHFSStartupFileID.
 			
 Input:		GPtr	-	pointer to scavenger global area
 
@@ -1215,22 +1322,17 @@ OSErr	CreateExtendedAllocationsFCB( SGlobPtr GPtr )
 		fcb = GPtr->calculatedAllocationsFCB;
 		CopyMemory( volumeHeader->allocationFile.extents, fcb->fcbExtents32, sizeof(HFSPlusExtentRecord) );
 
-		err = CheckFileExtents( GPtr, kHFSAllocationFileID, 0, (void *)fcb->fcbExtents32, &numABlks );
+		err = CheckFileExtents( GPtr, kHFSAllocationFileID, kDataFork, NULL, (void *)fcb->fcbExtents32, &numABlks);
 		if (err) goto exit;
 
 		//
 		// The allocation file will get processed in whole allocation blocks, or
 		// maximal-sized cache blocks, whichever is smaller.  This means the cache
 		// doesn't need to cope with buffers that are larger than a cache block.
-		//
-		// The definition of CACHE_IOSIZE below matches the definition in fsck_hfs.c.
-		// If you change it here, then change it there, too.  Or else put it in some
-		// common header file.
-		#define CACHE_IOSIZE 32768
-		if (vcb->vcbBlockSize < CACHE_IOSIZE)
+		if (vcb->vcbBlockSize < fscache.BlockSize)
 			(void) SetFileBlockSize (fcb, vcb->vcbBlockSize);
 		else
-			(void) SetFileBlockSize (fcb, CACHE_IOSIZE);
+			(void) SetFileBlockSize (fcb, fscache.BlockSize);
 	
 		if ( volumeHeader->allocationFile.totalBlocks != numABlks )
 		{
@@ -1249,7 +1351,7 @@ OSErr	CreateExtendedAllocationsFCB( SGlobPtr GPtr )
 		fcb = GPtr->calculatedStartupFCB;
 		CopyMemory( volumeHeader->startupFile.extents, fcb->fcbExtents32, sizeof(HFSPlusExtentRecord) );
 
-		err = CheckFileExtents( GPtr, kHFSStartupFileID, 0, (void *)fcb->fcbExtents32, &numABlks );
+		err = CheckFileExtents( GPtr, kHFSStartupFileID, kDataFork, NULL, (void *)fcb->fcbExtents32, &numABlks);
 		if (err) goto exit;
 
 		fcb->fcbLogicalSize  = volumeHeader->startupFile.logicalSize;
@@ -1591,7 +1693,7 @@ resumeAtParent:
 			valence = isHFSPlus == true ? record2.hfsPlusFolder.valence : (UInt32)record2.hfsFolder.valence;
 
 			if ( valence != dprP->offspringIndex -1 ) 				/* check its valence */
-				if ( result = RcdValErr( GPtr, E_DirVal, dprP->offspringIndex -1, valence, dprP->parentDirID ) )
+				if ( ( result = RcdValErr( GPtr, E_DirVal, dprP->offspringIndex -1, valence, dprP->parentDirID ) ) )
 					return( result );
 
 			GPtr->DirLevel--;										/* move up a level */			
@@ -1610,19 +1712,19 @@ resumeAtParent:
 	//	verify directory and file counts (all nonfatal, repairable errors)
 	//
 	if (!isHFSPlus && (rtdirCnt != calculatedVCB->vcbNmRtDirs)) /* check count of dirs in root */
-		if ( result = RcdValErr(GPtr,E_RtDirCnt,rtdirCnt,calculatedVCB->vcbNmRtDirs,0) )
+		if ( ( result = RcdValErr(GPtr,E_RtDirCnt,rtdirCnt,calculatedVCB->vcbNmRtDirs,0) ) )
 			return( result );
 
 	if (!isHFSPlus && (rtfilCnt != calculatedVCB->vcbNmFls)) /* check count of files in root */
-		if ( result = RcdValErr(GPtr,E_RtFilCnt,rtfilCnt,calculatedVCB->vcbNmFls,0) )
+		if ( ( result = RcdValErr(GPtr,E_RtFilCnt,rtfilCnt,calculatedVCB->vcbNmFls,0) ) )
 			return( result );
 
 	if (dirCnt != calculatedVCB->vcbFolderCount) /* check count of dirs in volume */
-		if ( result = RcdValErr(GPtr,E_DirCnt,dirCnt,calculatedVCB->vcbFolderCount,0) )
+		if ( ( result = RcdValErr(GPtr,E_DirCnt,dirCnt,calculatedVCB->vcbFolderCount,0) ) )
 			return( result );
 		
 	if (filCnt != calculatedVCB->vcbFileCount) /* check count of files in volume */
-		if ( result = RcdValErr(GPtr,E_FilCnt,filCnt,calculatedVCB->vcbFileCount,0) )
+		if ( ( result = RcdValErr(GPtr,E_FilCnt,filCnt,calculatedVCB->vcbFileCount,0) ) )
 			return( result );
 
 	return( noErr );
@@ -1676,7 +1778,7 @@ OSErr	CreateAttributesBTreeControlBlock( SGlobPtr GPtr )
 
 		CopyMemory( volumeHeader->attributesFile.extents, GPtr->calculatedAttributesFCB->fcbExtents32, sizeof(HFSPlusExtentRecord) );
 
-		err = CheckFileExtents( GPtr, kHFSAttributesFileID, 0, (void *)GPtr->calculatedAttributesFCB->fcbExtents32, &numABlks );	
+		err = CheckFileExtents( GPtr, kHFSAttributesFileID, kDataFork, NULL, (void *)GPtr->calculatedAttributesFCB->fcbExtents32, &numABlks);	
 		if (err) goto exit;
 
 		if ( volumeHeader->attributesFile.totalBlocks != numABlks )					//	check out the PEOF
@@ -1797,84 +1899,529 @@ exit:
 	return (err);
 }
 
-/*------------------------------------------------------------------------------
+/* 
+ * Function: RecordLastAttrBits
+ *
+ * Description:
+ *	Updates the Chinese Remainder Theorem buckets with extended attribute 
+ *  information for the previous fileID stored in the global structure.
+ *
+ * Input:	
+ *	GPtr - pointer to scavenger global area
+ *		* GPtr->lastAttrInfo.fileID - fileID of last attribute seen
+ *	
+ * Output:	Nothing
+ */
+static void RecordLastAttrBits(SGlobPtr GPtr) 
+{
+	/* lastAttrInfo structure is initialized to zero and hence ignore 
+	 * recording information for fileID = 0.  fileIDs < 16 (except for 
+	 * fileID = 2) can have extended attributes but do not have 
+	 * corresponding entry in catalog Btree.  Ignore recording these
+	 * fileIDs for Chinese Remainder Theorem buckets.  Currently we only
+	 * set extended attributes for fileID = 1 among these fileIDs 
+     * and this can change in future (see 3984119)
+	 */
+	if ((GPtr->lastAttrInfo.fileID == 0) || 
+		((GPtr->lastAttrInfo.fileID < kHFSFirstUserCatalogNodeID) && 
+	    (GPtr->lastAttrInfo.fileID != kHFSRootFolderID))) {
+		return;
+	}
 
+	if (GPtr->lastAttrInfo.hasSecurity == true) {
+		/* fileID has both extended attribute and ACL */
+		RecordXAttrBits(GPtr, kHFSHasAttributesMask | kHFSHasSecurityMask, 
+			GPtr->lastAttrInfo.fileID, kCalculatedAttributesRefNum);
+		GPtr->lastAttrInfo.hasSecurity = false;
+	} else {
+		/* fileID only has extended attribute */
+		RecordXAttrBits(GPtr, kHFSHasAttributesMask, 
+			GPtr->lastAttrInfo.fileID, kCalculatedAttributesRefNum);
+	}
+}
+
+/* 
+ * Function: setLastAttrAllocInfo
+ *
+ * Description: 
+ *	Set the global structure of last extended attribute with
+ * 	the allocation block information.  Also set the isValid to true 
+ *	to indicate that the data is valid and should be used to verify
+ *  allocation blocks.
+ *
+ * Input:
+ *	GPtr 		- pointer to scavenger global area
+ *	totalBlocks - total blocks allocated by the attribute
+ * 	logicalSize - logical size of the attribute
+ *	calculatedBlocks - blocks accounted by the attribute in current extent
+ *
+ * Output: Nothing
+ */
+static void setLastAttrAllocInfo(SGlobPtr GPtr, u_int32_t totalBlocks, 
+				u_int64_t logicalSize, u_int32_t calculatedTotalBlocks)
+{
+	GPtr->lastAttrInfo.totalBlocks = totalBlocks;
+	GPtr->lastAttrInfo.logicalSize = logicalSize;
+	GPtr->lastAttrInfo.calculatedTotalBlocks = calculatedTotalBlocks;
+	GPtr->lastAttrInfo.isValid = true;
+}
+
+/* 
+ * Function: CheckLastAttrAllocation
+ *
+ * Description:
+ *	Checks the allocation block information stored for the last 
+ * 	extended attribute seen during extended attribute BTree traversal.
+ *  Always resets the information stored for last EA allocation.
+ *
+ * Input:	GPtr - pointer to scavenger global area
+ *
+ * Output:	int - function result:			
+ *				zero - no error
+ *				non-zero - error
+ */
+static int CheckLastAttrAllocation(SGlobPtr GPtr) 
+{
+	int result = 0;
+	u_int64_t bytes;
+
+	if (GPtr->lastAttrInfo.isValid == true) {
+		if (GPtr->lastAttrInfo.totalBlocks != 
+			GPtr->lastAttrInfo.calculatedTotalBlocks) {
+			result = RecordBadAllocation(GPtr->lastAttrInfo.fileID, 
+						GPtr->lastAttrInfo.attrname, kEAData, 
+						GPtr->lastAttrInfo.totalBlocks, 
+						GPtr->lastAttrInfo.calculatedTotalBlocks);
+		} else {
+			bytes = (u_int64_t)GPtr->lastAttrInfo.calculatedTotalBlocks * 
+					(u_int64_t)GPtr->calculatedVCB->vcbBlockSize;
+			if (GPtr->lastAttrInfo.logicalSize > bytes) {
+				result = RecordTruncation(GPtr->lastAttrInfo.fileID,
+							GPtr->lastAttrInfo.attrname, kEAData, 
+							GPtr->lastAttrInfo.logicalSize, bytes);
+			}
+		}
+
+		/* Invalidate information in the global structure */
+		GPtr->lastAttrInfo.isValid = false;
+	}
+
+	return (result);
+}
+
+/*------------------------------------------------------------------------------
 Function:	CheckAttributeRecord
 
-Function:	This is call back function called for all leaf records in 
-		Attribute BTree.  This function verifies that for every extended
-		attribute and security attribute the corresponding bits in 
-		Catalog BTree are set.  
-			
-Input:		GPtr		-	pointer to scavenger global area
+Description:
+		This is call back function called for all leaf records in 
+		Attribute BTree during the verify and repair stage.  The basic
+		functionality of the function is same during verify and repair 
+		stages except that whenever it finds corruption, the verify 
+		stage prints message and the repair stage repairs it.  In the verify 
+		stage, this function accounts for allocation blocks used
+		by extent-based extended attributes and also updates the chinese 
+		remainder theorem buckets corresponding the extended attribute 
+		and security bit.
+
+		1. Only in the verify stage, if the fileID or attribute name of current 
+		extended attribute are not same as the previous attribute, check the 
+		allocation block counts for the previous attribute.
+
+		2. Only in the verify stage, If the fileID of current attribute is not 
+		same as the previous attribute, record the previous fileID information 
+		for Chinese	Remainder Theorem.
+
+		3. For attribute type,
+			kHFSPlusAttrForkData: 
+			---------------------
+			Do all of the following during verify stage and nothing in repair
+			stage - 
+	
+			Check the start block for extended attribute from the key.  If not
+			zero, print error.
+
+			Account for blocks occupied by this extent and store the allocation 
+			information for this extent to check in future.  Also update the 
+			last attribute information in the global structure.
+
+			kHFSPlusAttrExtents:
+			--------------------
+			If the current attribute's fileID is not same as previous fileID, or
+			if the previous recordType is not a valid forkData or overflow extent
+			record, report an error in verify stage or mark it for deletion in
+			repair stage.
+
+			Do all of the following during verify stage and nothing in repair
+			stage - 
+	
+			Check the start block for extended attribute from the key.  If not
+			equal to the total blocks seen uptil last attribtue, print error.
+
+			Account for blocks occupied by this extent.  Update previous
+			attribute allocation information with blocks seen in current
+			extent.  Also update last attribute block information in the global
+			structure.
+
+			kHFSPlusAttrInlineData:
+			-----------------------
+			Only in the verify stage, check if the start block in the key is 
+			equal to zero.  If not, print error.
+
+			Unknown type: 
+			-------------
+			In verify stage, report error.  In repair stage, mark the record
+			to delete.
+
+		4. If a record is marked for deletion, delete the record. 
+		
+		5. Before exiting from the function, always do the following -  
+			a. Indicate if the extended attribute was an ACL
+			b. Update previous fileID and recordType with current information.
+			c. Update previous attribute name with current attribute name. 
+
+Input:	GPtr	-	pointer to scavenger global area
 		key		-	key for current attribute
 		rec		- 	attribute record
-		reclen		- 	length of the record
+		reclen	- 	length of the record
 
-Output:		int		-	function result:			
-								0	= no error
-								n 	= error code 
+Output:	int		-	function result:			
+			0	= no error
+			n 	= error code 
 ------------------------------------------------------------------------------*/
-
-static int 
+int 
 CheckAttributeRecord(SGlobPtr GPtr, const HFSPlusAttrKey *key, const HFSPlusAttrRecord *rec, UInt16 reclen)
 {
 	int result = 0;
-	Boolean isHFSPlus;
+	unsigned char attrname[XATTR_MAXNAMELEN+1];
+	size_t attrlen;
+	u_int32_t blocks;
+	u_int32_t fileID;
+	struct attributeInfo *prevAttr;
+	Boolean isSameAttr = true;
+	Boolean doDelete = false;
+	u_int16_t dfaStage = GetDFAStage();
 
-	/* Check if the volume is HFS Plus volume */
-	isHFSPlus = VolumeObjectIsHFSPlus();
-	if (!isHFSPlus) {
-		goto out;
+	/* Assert if volume is not HFS Plus */
+	assert(VolumeObjectIsHFSPlus() == true);
+
+	prevAttr = &(GPtr->lastAttrInfo);
+	fileID = key->fileID;
+	/* Convert unicode attribute name to UTF-8 string */
+	(void) utf_encodestr(key->attrName, key->attrNameLen * 2, attrname, &attrlen, sizeof(attrname));
+	attrname[attrlen] = '\0';
+
+	/* Compare the current attribute to last attribute seen */
+	if ((fileID != prevAttr->fileID) ||
+		(strcmp((char *)attrname, (char *)prevAttr->attrname) != 0)) {
+		isSameAttr = false;
 	}
 
-#if DEBUG_XATTR
-	char attrName[XATTR_MAXNAMELEN];
-	size_t len;
-
-	/* Convert unicode attribute name to char */
-	(void) utf_encodestr(key->attrName, key->attrNameLen * 2, attrName, &len);
-	attrName[len] = '\0';
-	printf ("%s(%s,%d): fileID=%d AttributeName=%s\n", __FUNCTION__, __FILE__, __LINE__, key->fileID, attrName);
-#endif
-	
-	/* 3984119 - Do not include extended attributes for file IDs less
-	 * kHFSFirstUserCatalogNodeID but not equal to kHFSRootFolderID 
-	 * in prime modulus checksum.  These file IDs do not have 
-	 * any catalog record
+	/* We check allocation block information and record EA information for
+	 * CRT bucket in verify stage and hence no need to do it again in 
+	 * repair stage.
 	 */
-	if ((key->fileID < kHFSFirstUserCatalogNodeID) && 
-	    (key->fileID != kHFSRootFolderID)) {
-		goto out;
-	}
-	
-	if (GPtr->lastAttrFileID.fileID != key->fileID) {
-		/* fsck is seeing this fileID in Attribute BTree for first time */
-		GPtr->lastAttrFileID.fileID = key->fileID;
-		GPtr->lastAttrFileID.hasSecurity = false;
-		
-		if (!bcmp(key->attrName, GPtr->securityAttrName, GPtr->securityAttrLen)) {
-			/* file has both extended attribute and ACL */
-			RecordXAttrBits(GPtr, kHFSHasAttributesMask | kHFSHasSecurityMask, key->fileID, kCalculatedAttributesRefNum);
-			GPtr->lastAttrFileID.hasSecurity = true;
-		} else {
-			/* file only has extended attribute */
-			RecordXAttrBits(GPtr, kHFSHasAttributesMask, key->fileID, kCalculatedAttributesRefNum);
+	if (dfaStage == kVerifyStage) {
+		/* Different attribute - check allocation block information */
+		if (isSameAttr == false) {
+			result = CheckLastAttrAllocation(GPtr);
+			if (result) { 
+				goto update_out;
+			}
 		}
-	} else {
-		/* fsck has seen this fileID before */
-		if ((GPtr->lastAttrFileID.hasSecurity == false) && !bcmp(key->attrName, GPtr->securityAttrName, GPtr->securityAttrLen)) {
-			/* If GPtr->lastAttrFileID did not have security AND current xattr is ACL, 
-			 * we ONLY record ACL (as we have already recorded extended attribute
+
+		/* Different fileID - record information in CRT bucket */
+		if (fileID != prevAttr->fileID) {
+			RecordLastAttrBits(GPtr);
+		} 
+	}
+
+	switch (rec->recordType) {
+		case kHFSPlusAttrForkData: {
+			/* Check start block only in verify stage to avoid printing message
+			 * in repair stage.  Note that this corruption is not repairable 
+			 * currently.  Also check extents only in verify stage to avoid 
+			 * false overlap extents error. 
 			 */
-			RecordXAttrBits(GPtr, kHFSHasSecurityMask, key->fileID, kCalculatedAttributesRefNum);
-			GPtr->lastAttrFileID.hasSecurity = true;
+			if (dfaStage == kVerifyStage) {
+				/* Start block in the key should be zero */
+				if (key->startBlock != 0) {
+					RcdError(GPtr, E_ABlkSt);
+					result = E_ABlkSt;
+					goto err_out;
+				}
+
+				/* Check the extent information and record overlapping extents, if any */
+				result = CheckFileExtents (GPtr, fileID, kEAData, attrname, 
+							rec->forkData.theFork.extents, &blocks);
+				if (result) {
+					goto update_out;
+				}
+			
+				/* Store allocation information to check in future */
+				(void) setLastAttrAllocInfo(GPtr, rec->forkData.theFork.totalBlocks, 
+							rec->forkData.theFork.logicalSize, blocks);
+			}
+			break;
 		}
+
+		case kHFSPlusAttrExtents: {
+			/* Different attribute/fileID or incorrect previous record type */
+			if ((isSameAttr == false) || 
+				((prevAttr->recordType != kHFSPlusAttrExtents) && 
+				(prevAttr->recordType != kHFSPlusAttrForkData))) {
+				if (dfaStage == kRepairStage) {
+					/* Delete record in repair stage */
+					doDelete = true;
+				} else { 
+					/* Report error in verify stage */
+					RcdError(GPtr, E_AttrRec);
+					GPtr->ABTStat |= S_AttrRec;
+					goto err_out;
+				}
+			}
+			
+			/* Check start block only in verify stage to avoid printing message
+			 * in repair stage.  Note that this corruption is not repairable 
+			 * currently.  Also check extents only in verify stage to avoid 
+			 * false overlap extents error. 
+			 */
+			if (dfaStage == kVerifyStage) {	
+				/* startBlock in the key should be equal to total blocks 
+				 * seen uptil last attribute.
+				 */
+				if (key->startBlock != prevAttr->calculatedTotalBlocks) {
+					RcdError(GPtr, E_ABlkSt);
+					result = E_ABlkSt;
+					goto err_out;
+				}
+
+				/* Check the extent information and record overlapping extents, if any */
+				result = CheckFileExtents (GPtr, fileID, kEAData, attrname, 
+							rec->overflowExtents.extents, &blocks);
+				if (result) {
+					goto update_out;
+				}
+				
+				/* Increment the blocks seen uptil now for this attribute */
+				prevAttr->calculatedTotalBlocks += blocks;
+			}
+			break;
+		}
+
+		case kHFSPlusAttrInlineData: {
+			/* Check start block only in verify stage to avoid printing message
+			 * in repair stage.
+			 */
+			if (dfaStage == kVerifyStage) {
+				/* Start block in the key should be zero */
+				if (key->startBlock != 0) {
+					RcdError(GPtr, E_ABlkSt);
+					result = E_ABlkSt;
+					goto err_out;
+				}
+			}
+			break;
+		}
+
+		default: {
+			/* Unknown attribute record */
+			if (dfaStage == kRepairStage) {
+				/* Delete record in repair stage */
+				doDelete = true;
+			} else { 
+				/* Report error in verify stage */
+				RcdError(GPtr, E_AttrRec);
+				GPtr->ABTStat |= S_AttrRec;
+				goto err_out;
+			}
+			break;
+		}
+	};
+	
+	if (doDelete == true) {
+		result = DeleteBTreeRecord(GPtr->calculatedAttributesFCB, key);
+		dprintf (d_info|d_xattr, "%s: Deleting attribute %s for fileID %d, type = %d\n", __FUNCTION__, attrname, key->fileID, rec->recordType);
+		if (result) {
+			dprintf (d_error|d_xattr, "%s: Error in deleting record for %s for fileID %d, type = %d\n", __FUNCTION__, attrname, key->fileID, rec->recordType);
+		}
+		
+		/* Set flags to mark header and map dirty */
+		GPtr->ABTStat |= S_BTH + S_BTM;	
+		goto err_out;
 	}
+
+update_out:
+	/* Note that an ACL exists for this fileID */
+	if (strcmp((char *)attrname, KAUTH_FILESEC_XATTR) == 0) {
+		prevAttr->hasSecurity = true;
+	}
+
+	/* Always update the last recordType, fileID and attribute name before exiting */
+	prevAttr->recordType = rec->recordType;
+	prevAttr->fileID = fileID;
+	(void) strlcpy((char *)prevAttr->attrname, (char *)attrname, sizeof(prevAttr->attrname));
+
+	goto out;
+
+err_out:
+	/* If the current record is invalid/bogus, decide whether to update 
+	 * fileID stored in global structure for future comparison based on the 
+	 * previous fileID.  
+	 * If the current bogus record's fileID is different from fileID of the 
+	 * previous good record, we do not want to account for bogus fileID in 
+	 * the Chinese Remainder Theorem when we see next good record.
+	 * Hence reset the fileID in global structure to dummy value.  Example, 
+	 * if the fileIDs are 10 15 20 and record with ID=15 is bogus, we do not 
+	 * want to account for record with ID=15.
+	 * If the current bogus record's fileID is same as the fileID of the
+	 * previous good record, we want to account for this fileID in the 
+	 * next good record we see after this bogus record.  Hence do not
+	 * reset the fileID to dummy value.  Example, if the records have fileID
+	 * 10 10 30 and the second record with ID=10 is bogus, we want to 
+	 * account for ID=10 when we see record with ID=30.
+	 */ 
+	if (prevAttr->fileID != fileID) {
+		prevAttr->fileID = 0;
+	}
+
 out:
 	return(result);
 }
 	
+/* Function:	RecordXAttrBits
+ *
+ * Description:
+ * This function increments the prime number buckets for the associated 
+ * prime bucket set based on the flags and btreetype to determine 
+ * the discrepancy between the attribute btree and catalog btree for
+ * extended attribute data consistency.  This function is based on
+ * Chinese Remainder Theorem.  
+ * 
+ * Alogrithm:
+ * 1. If none of kHFSHasAttributesMask or kHFSHasSecurity mask is set, 
+ *    return.
+ * 2. Based on btreetype and the flags, determine which prime number
+ *    bucket should be updated.  Initialize pointers accordingly. 
+ * 3. Divide the fileID with pre-defined prime numbers. Store the 
+ *    remainder.
+ * 4. Increment each prime number bucket at an offset of the 
+ *    corresponding remainder with one.
+ *
+ * Input:	1. GPtr - pointer to global scavenger area
+ *        	2. flags - can include kHFSHasAttributesMask and/or kHFSHasSecurityMask
+ *        	3. fileid - fileID for which particular extended attribute is seen
+ *     	   	4. btreetye - can be kHFSPlusCatalogRecord or kHFSPlusAttributeRecord
+ *                            indicates which btree prime number bucket should be incremented
+ *
+ * Output:	nil
+ */
+void RecordXAttrBits(SGlobPtr GPtr, UInt16 flags, HFSCatalogNodeID fileid, UInt16 btreetype) 
+{
+	PrimeBuckets *cur_attr = NULL;
+	PrimeBuckets *cur_sec = NULL;
+
+	if ( ((flags & kHFSHasAttributesMask) == 0) && 
+	     ((flags & kHFSHasSecurityMask) == 0) ) {
+		/* No attributes exists for this fileID */
+		goto out;
+	}
+	
+	/* Determine which bucket are we updating */
+	if (btreetype ==  kCalculatedCatalogRefNum) {
+		/* Catalog BTree buckets */
+		if (flags & kHFSHasAttributesMask) {
+			cur_attr = &(GPtr->CBTAttrBucket); 
+			GPtr->cat_ea_count++;
+		}
+		if (flags & kHFSHasSecurityMask) {
+			cur_sec = &(GPtr->CBTSecurityBucket); 
+			GPtr->cat_acl_count++;
+		}
+	} else if (btreetype ==  kCalculatedAttributesRefNum) {
+		/* Attribute BTree buckets */
+		if (flags & kHFSHasAttributesMask) {
+			cur_attr = &(GPtr->ABTAttrBucket); 
+			GPtr->attr_ea_count++;
+		}
+		if (flags & kHFSHasSecurityMask) {
+			cur_sec = &(GPtr->ABTSecurityBucket); 
+			GPtr->attr_acl_count++;
+		}
+	} else {
+		/* Incorrect btreetype found */
+		goto out;
+	}
+
+	if (cur_attr) {
+		add_prime_bucket_uint32(cur_attr, fileid);
+	}
+
+	if (cur_sec) {
+		add_prime_bucket_uint32(cur_sec, fileid);
+	}
+
+out:
+	return;
+}
+
+/* Function:	CompareXattrPrimeBuckets
+ *
+ * Description:
+ * This function compares the prime number buckets for catalog btree
+ * and attribute btree for the given attribute type (normal attribute
+ * bit or security bit).
+ *
+ * Input:	1. GPtr - pointer to global scavenger area
+ *         	2. BitMask - indicate which attribute type should be compared.
+ *        	             can include kHFSHasAttributesMask and/or kHFSHasSecurityMask
+ * Output:	zero - buckets were compared successfully
+ *            	non-zero - buckets were not compared 
+ */
+static int CompareXattrPrimeBuckets(SGlobPtr GPtr, UInt16 BitMask) 
+{
+	int result = 1;
+	PrimeBuckets *cat;	/* Catalog BTree */
+	PrimeBuckets *attr;	/* Attribute BTree */
+	
+	/* Find the correct PrimeBuckets to compare */
+	if (BitMask & kHFSHasAttributesMask) {
+		/* Compare buckets for attribute bit */
+		cat = &(GPtr->CBTAttrBucket);
+		attr = &(GPtr->ABTAttrBucket); 
+	} else if (BitMask & kHFSHasSecurityMask) {
+		/* Compare buckets for security bit */
+		cat = &(GPtr->CBTSecurityBucket);
+		attr = &(GPtr->ABTSecurityBucket); 
+	} else {
+	plog ("%s: Incorrect BitMask found.\n", __FUNCTION__);
+		goto out;
+	}
+
+	result = compare_prime_buckets(cat, attr);
+	if (result) {
+		char catbtree[32], attrbtree[32];
+		/* Unequal values found, set the error bit in ABTStat */
+		if (BitMask & kHFSHasAttributesMask) {
+			PrintError (GPtr, E_IncorrectAttrCount, 0);
+			sprintf (catbtree, "%u", GPtr->cat_ea_count);
+			sprintf (attrbtree, "%u", GPtr->attr_ea_count);
+			PrintError (GPtr, E_BadValue, 2, attrbtree, catbtree);
+			GPtr->ABTStat |= S_AttributeCount; 
+		} else {
+			PrintError (GPtr, E_IncorrectSecurityCount, 0);
+			sprintf (catbtree, "%u", GPtr->cat_acl_count);
+			sprintf (attrbtree, "%u", GPtr->attr_acl_count);
+			PrintError (GPtr, E_BadValue, 2, attrbtree, catbtree);
+			GPtr->ABTStat |= S_SecurityCount; 
+		}
+	} 
+
+	result = 0;
+
+out:
+	return result;
+}
+
 /*------------------------------------------------------------------------------
 
 Function:	AttrBTChk - (Attributes BTree Check)
@@ -1912,12 +2459,19 @@ OSErr AttrBTChk( SGlobPtr GPtr )
 	err = BTCheck( GPtr, kCalculatedAttributesRefNum, (CheckLeafRecordProcPtr)CheckAttributeRecord);
 	ReturnIfError( err );														//	invalid attributes file BTree
 
+	//  check the allocation block information about the last attribute
+	err = CheckLastAttrAllocation(GPtr);
+	ReturnIfError(err);
+
+	//  record the last fileID for Chinese Remainder Theorem comparison
+	RecordLastAttrBits(GPtr);
+
 	//	compare the attributes prime buckets calculated from catalog btree and attribute btree 
-	err = ComparePrimeBuckets(GPtr, kHFSHasAttributesMask);
+	err = CompareXattrPrimeBuckets(GPtr, kHFSHasAttributesMask);
 	ReturnIfError( err );
 
 	//	compare the security prime buckets calculated from catalog btree and attribute btree 
-	err = ComparePrimeBuckets(GPtr, kHFSHasSecurityMask);
+	err = CompareXattrPrimeBuckets(GPtr, kHFSHasSecurityMask);
 	ReturnIfError( err );
 
 	//
@@ -1996,6 +2550,84 @@ static int RcdValErr( SGlobPtr GPtr, OSErr type, UInt32 correct, UInt32 incorrec
 	return( noErr );										/* successful return */
 }
 
+/*------------------------------------------------------------------------------
+
+Name:		RcdHsFldCntErr - (Record HasFolderCount)
+
+Function:	Allocates a RepairOrder node and linkg it into the 'GPtr->RepairP'
+			list, to describe folder flag missing the HasFolderCount bit
+
+Input:		GPtr		- ptr to scavenger global data
+			type		- error code (E_xxx), which should be >0
+			correct		- the folder mask, as computed here
+			incorrect	- the folder mask, as found in volume
+			fid			- the folder id
+
+Output:		0 			- no error
+			R_NoMem		- not enough mem to allocate record
+------------------------------------------------------------------------------*/
+
+int RcdHsFldCntErr( SGlobPtr GPtr, OSErr type, UInt32 correct, UInt32 incorrect, HFSCatalogNodeID fid )
+{
+	RepairOrderPtr	p;										/* the new node we compile */
+	char goodStr[32], badStr[32];
+
+	snprintf(goodStr, sizeof(goodStr), "%u", fid);
+	PrintError(GPtr, type, 1, goodStr);
+	sprintf(goodStr, "%#x", correct);
+	sprintf(badStr, "%#x", incorrect);
+	PrintError(GPtr, E_BadValue, 2, goodStr, badStr);
+	
+	p = AllocMinorRepairOrder( GPtr,0 );					/* get the node */
+	if (p==NULL) 											/* quit if out of room */
+		return (R_NoMem);
+	
+	p->type			= type;									/* save error info */
+	p->correct		= correct;
+	p->incorrect	= incorrect;
+	p->parid		= fid;
+	
+	return( noErr );										/* successful return */
+}
+/*------------------------------------------------------------------------------
+
+Name:		RcdFCntErr - (Record Folder Count)
+
+Function:	Allocates a RepairOrder node and linkg it into the 'GPtr->RepairP'
+			list, to describe an incorrect folder count for possible repair.
+
+Input:		GPtr		- ptr to scavenger global data
+			type		- error code (E_xxx), which should be >0
+			correct		- the correct folder count, as computed here
+			incorrect	- the incorrect folder count as found in volume
+			fid		- the folder id
+
+Output:		0 			- no error
+			R_NoMem		- not enough mem to allocate record
+------------------------------------------------------------------------------*/
+
+int RcdFCntErr( SGlobPtr GPtr, OSErr type, UInt32 correct, UInt32 incorrect, HFSCatalogNodeID fid )
+{
+	RepairOrderPtr	p;										/* the new node we compile */
+	char goodStr[32], badStr[32];
+
+	snprintf(goodStr, sizeof(goodStr), "%u", fid);
+	PrintError(GPtr, type, 1, goodStr);
+	sprintf(goodStr, "%d", correct);
+	sprintf(badStr, "%d", incorrect);
+	PrintError(GPtr, E_BadValue, 2, goodStr, badStr);
+	
+	p = AllocMinorRepairOrder( GPtr,0 );					/* get the node */
+	if (p==NULL) 											/* quit if out of room */
+		return (R_NoMem);
+	
+	p->type			= type;									/* save error info */
+	p->correct		= correct;
+	p->incorrect	= incorrect;
+	p->parid		= fid;
+
+	return( noErr );										/* successful return */
+}
 
 /*------------------------------------------------------------------------------
 
@@ -2175,12 +2807,12 @@ OSErr VInfoChk( SGlobPtr GPtr )
 		if ( VolumeObjectIsHFS( ) ) {
 			WriteError( GPtr, E_MDBDamaged, 0, 0 );
 			if ( GPtr->logLevel >= kDebugLog ) 
-				printf("\tinvalid alternate MDB at %qd result %d \n", GPtr->TarBlock, result);
+			plog("\tinvalid alternate MDB at %qd result %d \n", GPtr->TarBlock, result);
 		}
 		else {
 			WriteError( GPtr, E_VolumeHeaderDamaged, 0, 0 );
 			if ( GPtr->logLevel >= kDebugLog ) 
-				printf("\tinvalid alternate VHB at %qd result %d \n", GPtr->TarBlock, result);
+			plog("\tinvalid alternate VHB at %qd result %d \n", GPtr->TarBlock, result);
 		}
 		result = noErr;
 		goto exit;
@@ -2203,12 +2835,12 @@ OSErr VInfoChk( SGlobPtr GPtr )
 		if ( VolumeObjectIsHFS( ) ) {
 			WriteError( GPtr, E_MDBDamaged, 1, 0 );
 			if ( GPtr->logLevel >= kDebugLog )
-				printf("\tinvalid primary MDB at %qd result %d \n", GPtr->TarBlock, result);
+			plog("\tinvalid primary MDB at %qd result %d \n", GPtr->TarBlock, result);
 		}
 		else {
 			WriteError( GPtr, E_VolumeHeaderDamaged, 1, 0 );
 			if ( GPtr->logLevel >= kDebugLog )
-				printf("\tinvalid primary VHB at %qd result %d \n", GPtr->TarBlock, result);
+			plog("\tinvalid primary VHB at %qd result %d \n", GPtr->TarBlock, result);
 		}
 		result = noErr;
 		goto exit;
@@ -2221,7 +2853,7 @@ OSErr VInfoChk( SGlobPtr GPtr )
 		GPtr->VIStat |= S_WMDB;
 		WriteError( GPtr, E_MDBDamaged, 0, 0 );
 		if ( GPtr->logLevel >= kDebugLog )
-			printf("\tinvalid wrapper MDB \n");
+		plog("\tinvalid wrapper MDB \n");
 	}
 	
 	if ( isHFSPlus )
@@ -2338,7 +2970,25 @@ OSErr VInfoChk( SGlobPtr GPtr )
 		else
 			vcb->vcbAllocationFile->fcbClumpSize = 
 			(alternateVolumeHeader->allocationFile.extents[0].blockCount * vcb->vcbBlockSize);
-	
+
+		//	check out attribute file clump size
+		if (vcb->vcbAttributesFile) {
+			if ( ((volumeHeader->attributesFile.clumpSize % vcb->vcbBlockSize) == 0) && 
+			     (volumeHeader->attributesFile.clumpSize <= maxClump) &&
+			     (volumeHeader->attributesFile.clumpSize != 0))
+				vcb->vcbAttributesFile->fcbClumpSize = volumeHeader->attributesFile.clumpSize;
+			else if ( ((alternateVolumeHeader->attributesFile.clumpSize % vcb->vcbBlockSize) == 0) && 
+				  (alternateVolumeHeader->attributesFile.clumpSize <= maxClump) &&
+				  (alternateVolumeHeader->attributesFile.clumpSize != 0))
+				vcb->vcbAttributesFile->fcbClumpSize = alternateVolumeHeader->attributesFile.clumpSize;
+			else if (vcb->vcbCatalogFile->fcbClumpSize != 0)
+				// The original attribute clump may be too small, use catalog's
+				vcb->vcbAttributesFile->fcbClumpSize = vcb->vcbCatalogFile->fcbClumpSize;
+			else
+				vcb->vcbAttributesFile->fcbClumpSize = 
+				alternateVolumeHeader->attributesFile.extents[0].blockCount * vcb->vcbBlockSize;
+		}
+
 		CopyMemory( volumeHeader->finderInfo, vcb->vcbFinderInfo, sizeof(vcb->vcbFinderInfo) );
 		
 		//	Now compare verified Volume Header info (in the form of a vcb) with Volume Header info on disk
@@ -2523,8 +3173,8 @@ OSErr	VLockedChk( SGlobPtr GPtr )
 	if ( (record.recordType == kHFSPlusFolderRecord) || (record.recordType == kHFSFolderRecord) )
 	{
 		frFlags = record.recordType == kHFSPlusFolderRecord ?
-			SWAP_BE16(record.hfsPlusFolder.userInfo.frFlags) :
-			SWAP_BE16(record.hfsFolder.userInfo.frFlags);
+			record.hfsPlusFolder.userInfo.frFlags :
+			record.hfsFolder.userInfo.frFlags;
 	
 		if ( frFlags & fNameLocked )												// name locked bit set?
 			RcdNameLockedErr( GPtr, E_LockedDirName, frFlags );
@@ -2577,16 +3227,83 @@ static int RcdNameLockedErr( SGlobPtr GPtr, SInt16 type, UInt32 incorrect )					
 	return( noErr );										/* successful return */
 }
 
+/*------------------------------------------------------------------------------
+
+Name:		RecordBadExtent
+
+Function:	Allocates a RepairOrder for repairing bad extent.
+
+Input:		GPtr		- ptr to scavenger global data
+			fileID		- fileID of the file with bad extent
+			forkType	- bad extent's fork type
+			startBlock	- start block of the bad extent record 
+			badExtentIndex - index of bad extent entry in the extent record
+
+Output:		0 			- no error
+			R_NoMem		- not enough mem to allocate record
+------------------------------------------------------------------------------*/
+
+static int RecordBadExtent(SGlobPtr GPtr, UInt32 fileID, UInt8 forkType, 
+				UInt32 startBlock, UInt32 badExtentIndex) 
+{
+	RepairOrderPtr p;
+	Boolean isHFSPlus;
+
+	isHFSPlus = VolumeObjectIsHFSPlus();
+
+	p = AllocMinorRepairOrder(GPtr, 0);
+	if (p == NULL) {
+		return(R_NoMem);
+	}
+
+	p->type = E_ExtEnt;
+	p->forkType = forkType;
+	p->correct = badExtentIndex;
+	p->hint = startBlock;
+	p->parid = fileID;
+
+	GPtr->CatStat |= S_BadExtent;
+	return (0);
+}
 
 /*------------------------------------------------------------------------------
 
 Function:	CheckFileExtents - (Check File Extents)
 
-Function:	Verifies the extent info for a file.
+Description:
+		Verifies the extent info for a file data or extented attribute data.  It 
+		checks the correctness of extent data.  If the extent information is 
+		correct/valid, it updates in-memory volume bitmap, total number of valid 
+		blocks for given file, and if overlapping extents exist, adds them to 
+		the overlap extents list.  If the extent information is not correct, it 
+		considers the file truncated beyond the bad extent entry and reports
+		only the total number of good blocks seen.  Therefore the caller detects
+		adds the extent information to repair order. It does not include the 
+		invalid extent and any extents after it for checking volume bitmap and
+		hence overlapping extents.  Note that currently the function 
+		returns error if invalid extent is found for system files or for 
+		extended attributes.
+
+		For data fork and resource fork of file - This function checks extent 
+		record present in catalog record as well as extent overflow records, if 
+		any, for given fileID.
+
+		For extended attribute data - This function only checks the extent record
+		passed as parameter.  If any extended attribute has overflow extents in
+		the attribute btree, this function does not look them up.  It is the left 
+		to the caller to check remaining extents for given file's extended attribute.
 			
-Input:		GPtr		-	pointer to scavenger global area
-			fileNumber	-	file number
-			forkType	-	fork type ($00 = data fork, $FF = resource fork)
+Input:	
+			GPtr		-	pointer to scavenger global area
+			fileNumber	-	file number for fork/extended attribute
+			forkType	-	fork type 
+								00 - kDataFork - data fork
+								01 - kEAData   - extended attribute data extent
+								ff - kRsrcFork - resource fork 
+			attrname 	-	if fork type is kEAData, attrname contains pointer to the
+							name of extended attribute whose extent is being checked; else
+							it should be NULL.  Note that the function assumes that this is
+							NULL-terminated string.
 			extents		-	ptr to 1st extent record for the file
 
 Output:
@@ -2597,9 +3314,10 @@ Output:
 ------------------------------------------------------------------------------*/
 
 OSErr	CheckFileExtents( SGlobPtr GPtr, UInt32 fileNumber, UInt8 forkType, 
-						  const void *extents, UInt32 *blocksUsed )
+						  const unsigned char *attrname, const void *extents, 
+						  UInt32 *blocksUsed)
 {
-	UInt32				blockCount;
+	UInt32				blockCount = 0;
 	UInt32				extentBlockCount;
 	UInt32				extentStartBlock;
 	UInt32				hint;
@@ -2607,23 +3325,44 @@ OSErr	CheckFileExtents( SGlobPtr GPtr, UInt32 fileNumber, UInt8 forkType,
 	HFSPlusExtentKey	extentKey;
 	HFSPlusExtentRecord	extentRecord;
 	UInt16 				recSize;
-	OSErr				err;
+	OSErr				err = noErr;
 	SInt16				i;
 	Boolean				firstRecord;
 	Boolean				isHFSPlus;
+	unsigned int		lastExtentIndex;
+	Boolean 			foundBadExtent;
+
+	/* For all extended attribute extents, the attrname should not be NULL */
+	if (forkType == kEAData) {
+		assert(attrname != NULL);
+	}
 
 	isHFSPlus = VolumeObjectIsHFSPlus( );
-	firstRecord	= true;
-	err			= noErr;
-	blockCount	= 0;
+	firstRecord = true;
+	foundBadExtent = false;
+	lastExtentIndex = GPtr->numExtents;
 	
 	while ( (extents != nil) && (err == noErr) )
-	{
-		err = ChkExtRec( GPtr, extents );			//	checkout the extent record first
-		if ( err != noErr )							//	Bad extent record, don't mark it
-			break;
+	{	
+		//	checkout the extent record first
+		err = ChkExtRec( GPtr, extents, &lastExtentIndex );
+		if (err != noErr) {
+			dprintf (d_info, "%s: Bad extent for fileID %u in extent %u for startblock %u\n", __FUNCTION__, fileNumber, lastExtentIndex, blockCount);
+
+			/* Stop verification if bad extent is found for system file or EA */
+			if ((fileNumber < kHFSFirstUserCatalogNodeID) ||
+				(forkType == kEAData)) {
+				break;
+			}
+
+			/* store information about bad extent in repair order */
+			(void) RecordBadExtent(GPtr, fileNumber, forkType, blockCount, lastExtentIndex);
+			foundBadExtent = true;
+			err = noErr;
+		}
 			
-		for ( i=0 ; i<GPtr->numExtents ; i++ )		//	now checkout the extents
+		/* Check only till the last valid extent entry reported by ChkExtRec */
+		for ( i=0 ; i<lastExtentIndex ; i++ )		//	now checkout the extents
 		{
 			//	HFS+/HFS moving extent fields into local variables for evaluation
 			if ( isHFSPlus == true )
@@ -2639,9 +3378,10 @@ OSErr	CheckFileExtents( SGlobPtr GPtr, UInt32 fileNumber, UInt8 forkType,
 	
 			if ( extentBlockCount == 0 )
 				break;
+
 			err = CaptureBitmapBits(extentStartBlock, extentBlockCount);
 			if (err == E_OvlExt) {
-				err = AddExtentToOverlapList(GPtr, fileNumber, extentStartBlock, extentBlockCount, forkType);
+				err = AddExtentToOverlapList(GPtr, fileNumber, (char *)attrname, extentStartBlock, extentBlockCount, forkType);
 			}
 			
 			blockCount += extentBlockCount;
@@ -2649,7 +3389,23 @@ OSErr	CheckFileExtents( SGlobPtr GPtr, UInt32 fileNumber, UInt8 forkType,
 		
 		if ( fileNumber == kHFSExtentsFileID )		//	Extents file has no overflow extents
 			break;
-			
+
+		/* Found bad extent for this file, do not find any extents after 
+		 * current extent.  We assume that the file is truncated at the
+		 * bad extent entry
+		 */
+		if (foundBadExtent == true) {
+			break;
+		}
+			 
+		/* For extended attributes, only check the extent passed as parameter.  The
+		 * caller will take care of checking other extents, if any, for given 
+		 * extended attribute.
+		 */
+		if (forkType == kEAData) {
+			break;
+		}
+
 		if ( firstRecord == true )
 		{
 			firstRecord = false;
@@ -2737,21 +3493,29 @@ void	BuildExtentKey( Boolean isHFSPlus, UInt8 forkType, HFSCatalogNodeID fileNum
 //
 //	Adds this extent to our OverlappedExtentList for later repair.
 //
-OSErr	AddExtentToOverlapList( SGlobPtr GPtr, HFSCatalogNodeID fileNumber, UInt32 extentStartBlock, UInt32 extentBlockCount, UInt8 forkType )
+static OSErr	AddExtentToOverlapList( SGlobPtr GPtr, HFSCatalogNodeID fileNumber, const char *attrname, UInt32 extentStartBlock, UInt32 extentBlockCount, UInt8 forkType )
 {
 	UInt32			newHandleSize;
 	ExtentInfo		extentInfo;
 	ExtentsTable	**extentsTableH;
-	char fileno[32];
+	size_t attrlen;
 	
-	sprintf(fileno, "%ud", fileNumber);
-	PrintError(GPtr, E_OvlExt, 1, fileno);
-	GPtr->VIStat |= S_OverlappingExtents;
-	
-	extentInfo.fileNumber	= fileNumber;
+	ClearMemory(&extentInfo, sizeof(extentInfo));
+	extentInfo.fileID		= fileNumber;
 	extentInfo.startBlock	= extentStartBlock;
 	extentInfo.blockCount	= extentBlockCount;
 	extentInfo.forkType		= forkType;
+	/* store the name of extended attribute */
+	if (forkType == kEAData) {
+		assert(attrname != NULL);
+
+		attrlen = strlen(attrname) + 1;
+		extentInfo.attrname = malloc(attrlen);  
+		if (extentInfo.attrname == NULL) {
+			return(memFullErr);
+		}
+		strlcpy(extentInfo.attrname, attrname, attrlen);
+	}
 	
 	//	If it's uninitialized
 	if ( GPtr->overlappedExtents == nil )
@@ -2763,7 +3527,7 @@ OSErr	AddExtentToOverlapList( SGlobPtr GPtr, HFSCatalogNodeID fileNumber, UInt32
 	{
 		extentsTableH	= GPtr->overlappedExtents;
 
-		if ( ExtentInfoExists( extentsTableH, &extentInfo ) == true )
+		if ( ExtentInfoExists( extentsTableH, &extentInfo) == true )
 			return( noErr );
 
 		//	Grow the Extents table for a new entry.
@@ -2774,6 +3538,9 @@ OSErr	AddExtentToOverlapList( SGlobPtr GPtr, HFSCatalogNodeID fileNumber, UInt32
 	//	Copy the new extents into the end of the table
 	CopyMemory( &extentInfo, &((**extentsTableH).extentInfo[(**extentsTableH).count]), sizeof(ExtentInfo) );
 	
+	// 	Update the overlap extent bit
+	GPtr->VIStat |= S_OverlappingExtents;
+
 	//	Update the extent table count
 	(**extentsTableH).count++;
 	
@@ -2781,22 +3548,46 @@ OSErr	AddExtentToOverlapList( SGlobPtr GPtr, HFSCatalogNodeID fileNumber, UInt32
 }
 
 
-static	Boolean	ExtentInfoExists( ExtentsTable **extentsTableH, ExtentInfo *extentInfo )
+/* Compare if the given extentInfo exsists in the extents table */
+static	Boolean	ExtentInfoExists( ExtentsTable **extentsTableH, ExtentInfo *extentInfo)
 {
 	UInt32		i;
 	ExtentInfo	*aryExtentInfo;
 	
+
 	for ( i = 0 ; i < (**extentsTableH).count ; i++ )
 	{
 		aryExtentInfo	= &((**extentsTableH).extentInfo[i]);
 		
-		if ( extentInfo->fileNumber == aryExtentInfo->fileNumber )
+		if ( extentInfo->fileID == aryExtentInfo->fileID )
 		{
 			if (	(extentInfo->startBlock == aryExtentInfo->startBlock)	&& 
 					(extentInfo->blockCount == aryExtentInfo->blockCount)	&&
 					(extentInfo->forkType	== aryExtentInfo->forkType)		)
 			{
-				return( true );
+				/* startBlock, blockCount, forkType are same.  
+				 * Compare the extended attribute names, if they exist.
+				 */
+
+				/* If no attribute name exists, the two extents are same */
+				if ((extentInfo->attrname == NULL) &&
+					(aryExtentInfo->attrname == NULL)) {
+					return(true);
+				}
+
+				/* If only one attribute name exists, the two extents are not same */
+				if (((extentInfo->attrname != NULL) && (aryExtentInfo->attrname == NULL)) ||
+					((extentInfo->attrname == NULL) && (aryExtentInfo->attrname != NULL))) {
+					return(false);
+				}
+
+				/* Both attribute name exist.  Compare the names */
+				if (!strcmp(extentInfo->attrname, aryExtentInfo->attrname)) {
+					return (true);
+				} else {
+					return (false);
+				}
+
 			}
 		}
 	}
@@ -2804,3 +3595,464 @@ static	Boolean	ExtentInfoExists( ExtentsTable **extentsTableH, ExtentInfo *exten
 	return( false );
 }
 
+/* Function :  DoesOverlap
+ * 
+ * Description: 
+ * This function takes a start block and the count of blocks in a 
+ * given extent and compares it against the list of overlapped 
+ * extents in the global structure.   
+ * This is useful in finding the original files that overlap with
+ * the files found in catalog btree check.  If a file is found
+ * overlapping, it is added to the overlap list. 
+ * 
+ * Input: 
+ * 1. GPtr - global scavenger pointer.
+ * 2. fileID - file ID being checked.
+ * 3. attrname - name of extended attribute being checked, should be NULL for regular files
+ * 4. startBlock - start block in extent.
+ * 5. blockCount - total number of blocks in extent.
+ * 6. forkType - type of fork being check (kDataFork, kRsrcFork, kEAData).
+ * 
+ * Output: isOverlapped - Boolean value of true or false.
+ */
+static Boolean DoesOverlap(SGlobPtr GPtr, UInt32 fileID, const char *attrname, UInt32 startBlock, UInt32 blockCount, UInt8 forkType) 
+{
+	int i;
+	Boolean isOverlapped = false;
+	ExtentInfo	*curExtentInfo;
+	ExtentsTable **extentsTableH = GPtr->overlappedExtents;
+
+	for (i = 0; i < (**extentsTableH).count; i++) {
+		curExtentInfo = &((**extentsTableH).extentInfo[i]);
+		/* Check extents */
+		if (curExtentInfo->startBlock < startBlock) {
+			if ((curExtentInfo->startBlock + curExtentInfo->blockCount) > startBlock) {
+				isOverlapped = true;
+				break;
+			}
+		} else {	/* curExtentInfo->startBlock >= startBlock */
+			if (curExtentInfo->startBlock < (startBlock + blockCount)) {
+				isOverlapped = true;
+				break;
+			}
+		}
+	} /* for loop Extents Table */	
+
+	/* Add this extent to overlap list */
+	if (isOverlapped) {
+		AddExtentToOverlapList(GPtr, fileID, attrname, startBlock, blockCount, forkType);
+	}
+
+	return isOverlapped;
+} /* DoesOverlap */
+
+/* Function : CheckHFSPlusExtentRecords
+ * 
+ * Description: 
+ * For all valid extents, this function calls DoesOverlap to find
+ * if a given extent is overlapping with another extent existing
+ * in the overlap list.
+ * 
+ * Input: 
+ * 1. GPtr - global scavenger pointer.
+ * 2. fileID - file ID being checked.
+ * 3. attrname - name of extended attribute being checked, should be NULL for regular files
+ * 4. extent - extent information to check.
+ * 5. forkType - type of fork being check (kDataFork, kRsrcFork, kEAData).
+ * 
+ * Output: None.
+ */
+static void CheckHFSPlusExtentRecords(SGlobPtr GPtr, UInt32 fileID, const char *attrname, HFSPlusExtentRecord extent, UInt8 forkType) 
+{
+	int i;
+
+	/* Check for overlapping extents for all extents in given extent data */
+	for (i = 0; i < kHFSPlusExtentDensity; i++) {
+		if (extent[i].startBlock == 0) {
+			break;
+		}
+		DoesOverlap(GPtr, fileID, attrname, extent[i].startBlock, extent[i].blockCount, forkType);
+	} 
+	return;
+} /* CheckHFSPlusExtentRecords */ 
+
+/* Function : CheckHFSExtentRecords
+ * 
+ * Description: 
+ * For all valid extents, this function calls DoesOverlap to find
+ * if a given extent is overlapping with another extent existing
+ * in the overlap list.
+ * 
+ * Input: 
+ * 1. GPtr - global scavenger pointer.
+ * 2. fileID - file ID being checked.
+ * 3. extent - extent information to check.
+ * 4. forkType - type of fork being check (kDataFork, kRsrcFork).
+ * 
+ * Output: None.
+ */
+static void CheckHFSExtentRecords(SGlobPtr GPtr, UInt32 fileID, HFSExtentRecord extent, UInt8 forkType) 
+{
+	int i;
+
+	/* Check for overlapping extents for all extents in given extents */
+	for (i = 0; i < kHFSExtentDensity; i++) {
+		if (extent[i].startBlock == 0) {
+			break;
+		}
+		DoesOverlap(GPtr, fileID, NULL, extent[i].startBlock, extent[i].blockCount, forkType);
+	}
+	return;
+} /* CheckHFSExtentRecords */ 
+
+/* Function: FindOrigOverlapFiles 
+ * 
+ * Description:
+ * This function is called only if btree check results in
+ * overlapped extents errors.  The btree checks do not find
+ * out the original files whose extents are overlapping with one
+ * being reported in its check.  This function finds out all the 
+ * original files whose that are being overlapped.  
+ * 
+ * This function relies on comparison of extents with Overlap list
+ * created in verify stage.  The list is also updated with the 
+ * overlapped extents found in this function. 
+ * 
+ * 1. Compare extents for all the files located in volume header.
+ * 2. Traverse catalog btree and compare extents of all files.
+ * 3. Traverse extents btree and compare extents for all entries.
+ * 
+ * Input: GPtr - pointer to global scanvenger area.
+ * 
+ * Output: err - function result
+ *			zero means success
+ *			non-zero means failure
+ */
+int FindOrigOverlapFiles(SGlobPtr GPtr)
+{
+	OSErr err = noErr;
+	Boolean isHFSPlus; 
+
+	UInt16 selCode;		/* select access pattern for BTree */
+	UInt16 recordSize;
+	UInt32 hint;
+
+	CatalogRecord catRecord; 
+	CatalogKey catKey;
+
+	ExtentRecord extentRecord; 
+	ExtentKey extentKey;
+
+	HFSPlusAttrRecord attrRecord;
+	HFSPlusAttrKey attrKey;
+	char attrName[XATTR_MAXNAMELEN];
+	size_t len;
+
+	SVCB *calculatedVCB = GPtr->calculatedVCB;
+
+	isHFSPlus = VolumeObjectIsHFSPlus();
+
+	/* Check file extents from volume header */
+	if (isHFSPlus) {
+		/* allocation file */
+		if (calculatedVCB->vcbAllocationFile) {
+			CheckHFSPlusExtentRecords(GPtr, calculatedVCB->vcbAllocationFile->fcbFileID, NULL,
+		                              calculatedVCB->vcbAllocationFile->fcbExtents32, kDataFork);
+		}
+
+		/* extents file */
+		if (calculatedVCB->vcbExtentsFile) {
+			CheckHFSPlusExtentRecords(GPtr, calculatedVCB->vcbExtentsFile->fcbFileID, NULL,
+		                              calculatedVCB->vcbExtentsFile->fcbExtents32, kDataFork);
+		}
+
+		/* catalog file */
+		if (calculatedVCB->vcbCatalogFile) {
+			CheckHFSPlusExtentRecords(GPtr, calculatedVCB->vcbCatalogFile->fcbFileID, NULL,  
+		                              calculatedVCB->vcbCatalogFile->fcbExtents32, kDataFork);
+		}
+
+		/* attributes file */
+		if (calculatedVCB->vcbAttributesFile) {
+			CheckHFSPlusExtentRecords(GPtr, calculatedVCB->vcbAttributesFile->fcbFileID, NULL, 
+		                              calculatedVCB->vcbAttributesFile->fcbExtents32, kDataFork);	
+	   	}
+
+		/* startup file */
+		if (calculatedVCB->vcbStartupFile) {
+			CheckHFSPlusExtentRecords(GPtr, calculatedVCB->vcbStartupFile->fcbFileID, NULL, 
+		                              calculatedVCB->vcbStartupFile->fcbExtents32, kDataFork);
+		}
+	} else {
+		/* extents file */
+		if (calculatedVCB->vcbExtentsFile) {
+			CheckHFSExtentRecords(GPtr, calculatedVCB->vcbExtentsFile->fcbFileID, 
+		                          calculatedVCB->vcbExtentsFile->fcbExtents16, kDataFork);
+		}
+
+		/* catalog file */
+		if (calculatedVCB->vcbCatalogFile) {
+			CheckHFSExtentRecords(GPtr, calculatedVCB->vcbCatalogFile->fcbFileID, 
+		                          calculatedVCB->vcbCatalogFile->fcbExtents16, kDataFork);
+		}
+	}
+
+	/* Traverse the catalog btree */ 
+	selCode = 0x8001;	/* Get first record from BTree */
+	err = GetBTreeRecord(GPtr->calculatedCatalogFCB, selCode, &catKey, &catRecord, &recordSize, &hint);
+	if (err != noErr) {
+		goto traverseExtents;
+	} 
+	selCode = 1;	/* Get next record */
+	do {
+		if ((catRecord.recordType == kHFSPlusFileRecord) ||  
+		    (catRecord.recordType == kHFSFileRecord)) {
+			
+			if (isHFSPlus) {
+				/* HFSPlus data fork */
+				CheckHFSPlusExtentRecords(GPtr, catRecord.hfsPlusFile.fileID, NULL,
+			    	                      catRecord.hfsPlusFile.dataFork.extents, kDataFork);
+
+				/* HFSPlus resource fork */
+				CheckHFSPlusExtentRecords(GPtr, catRecord.hfsPlusFile.fileID, NULL,
+			    	                      catRecord.hfsPlusFile.resourceFork.extents, kRsrcFork);
+			} else {
+				/* HFS data extent */
+				CheckHFSExtentRecords(GPtr, catRecord.hfsFile.fileID, 
+			    	                  catRecord.hfsFile.dataExtents, kDataFork);
+
+				/* HFS resource extent */
+				CheckHFSExtentRecords(GPtr, catRecord.hfsFile.fileID,
+				                      catRecord.hfsFile.rsrcExtents, kRsrcFork);
+			}
+		}
+
+		/* Access the next record */
+		err = GetBTreeRecord( GPtr->calculatedCatalogFCB, selCode, &catKey, &catRecord, &recordSize, &hint );
+	} while (err == noErr); 
+
+traverseExtents:
+	/* Traverse the extents btree */ 
+	selCode = 0x8001;	/* Get first record from BTree */
+	err = GetBTreeRecord(GPtr->calculatedExtentsFCB, selCode, &extentKey, &extentRecord, &recordSize, &hint);
+	if (err != noErr) {
+		goto traverseAttribute;
+	}
+	selCode = 1;	/* Get next record */
+	do {
+		if (isHFSPlus) {
+			CheckHFSPlusExtentRecords(GPtr, extentKey.hfsPlus.fileID, NULL, 
+			                          extentRecord.hfsPlus, extentKey.hfsPlus.forkType);
+		} else {
+			CheckHFSExtentRecords(GPtr, extentKey.hfs.fileID, extentRecord.hfs, 
+			                      extentKey.hfs.forkType);
+		}
+
+		/* Access the next record */
+		err = GetBTreeRecord(GPtr->calculatedExtentsFCB, selCode, &extentKey, &extentRecord, &recordSize, &hint);
+	} while (err == noErr); 
+
+traverseAttribute:
+	/* Extended attributes are only supported in HFS Plus */
+	if (!isHFSPlus) {
+		goto out;
+	}
+
+	/* Traverse the attribute btree */
+	selCode = 0x8001;	/* Get first record from BTree */
+	/* Warning: Attribute record of type kHFSPlusAttrInlineData may be 
+	 * truncated on read! (4425232).  This function only uses recordType 
+	 * field from inline attribute record.
+	 */
+	err = GetBTreeRecord(GPtr->calculatedAttributesFCB, selCode, &attrKey, &attrRecord, &recordSize, &hint);
+	if (err != noErr) {
+		goto out;
+	}
+	selCode = 1;	/* Get next record */
+	do {
+		if (attrRecord.recordType == kHFSPlusAttrForkData) {
+			(void) utf_encodestr(attrKey.attrName, attrKey.attrNameLen * 2, (unsigned char *)attrName, &len, sizeof(attrName));
+			attrName[len] = '\0';
+
+			CheckHFSPlusExtentRecords(GPtr, attrKey.fileID, attrName, attrRecord.forkData.theFork.extents, kEAData);
+		} else if (attrRecord.recordType == kHFSPlusAttrExtents) {
+			(void) utf_encodestr(attrKey.attrName, attrKey.attrNameLen * 2, (unsigned char *)attrName, &len, sizeof(attrName));
+			attrName[len] = '\0';
+
+			CheckHFSPlusExtentRecords(GPtr, attrKey.fileID, attrName, attrRecord.overflowExtents.extents, kEAData);
+		}
+
+		/* Access the next record
+		 * Warning: Attribute record of type kHFSPlusAttrInlineData may be 
+		 * truncated on read! (4425232).  This function only uses recordType 
+		 * field from inline attribute record.
+		 */
+		err = GetBTreeRecord(GPtr->calculatedAttributesFCB, selCode, &attrKey, &attrRecord, &recordSize, &hint);
+	} while (err == noErr); 
+
+out:
+	if (err == btNotFound) {
+		err = noErr;
+	}
+	return err;
+} /* FindOrigOverlapFiles */
+
+/* Function: PrintOverlapFiles
+ *
+ * Description: Print the information about all unique overlapping files.  
+ * 1. Sort the overlap extent in increasing order of fileID
+ * 2. For every unique fileID, prefix the string with fileID and find the
+ *    filename/path based on fileID.
+ *		If fileID > kHFSFirstUserCatalogNodeID, find path to file
+ *		Else, find name of the system file.
+ * 3. Print the new string.
+ * Note that the path is printed only for HFS Plus volumes and not for 
+ * plain HFS volumes.  This is done by not allocating buffer for finding
+ * file path.
+ *
+ * Input:
+ *	GPtr - Global scavenger structure pointer.
+ *
+ * Output:
+ *	nothing (void)
+ */
+void PrintOverlapFiles (SGlobPtr GPtr)
+{
+	OSErr err;
+	ExtentsTable **extentsTableH;
+	ExtentInfo *extentInfo;
+	unsigned int numOverlapExtents;
+	unsigned int buflen, filepathlen;
+	char *filepath = NULL;
+	char filenum[32];
+	UInt32 lastID = 0;
+	UInt32 bytesWritten;
+	Boolean printMsg;
+	Boolean	isHFSPlus;
+	int i;
+	
+	isHFSPlus = VolumeObjectIsHFSPlus();
+
+	extentsTableH = GPtr->overlappedExtents;
+	numOverlapExtents = (**extentsTableH).count;
+	
+	/* Sort the list according to file ID */
+	qsort((**extentsTableH).extentInfo, numOverlapExtents, sizeof(ExtentInfo), 
+		  CompareExtentFileID);
+
+	buflen = PATH_MAX * 4;
+	/* Allocate buffer to read data */
+	if (isHFSPlus) {
+		filepath = malloc (buflen);
+	}
+	
+	for (i = 0; i < numOverlapExtents; i++) {
+		extentInfo = &((**extentsTableH).extentInfo[i]);
+
+		/* Skip the same fileID */
+		if (lastID == extentInfo->fileID) {
+			continue;
+		}
+
+		lastID = extentInfo->fileID;
+		printMsg = false;
+
+		if (filepath) {
+			/* prefix with the file ID */
+			bytesWritten = sprintf (filepath, "%u ", extentInfo->fileID);
+			filepathlen = buflen - bytesWritten;
+	
+			if (extentInfo->fileID >= kHFSFirstUserCatalogNodeID) {
+				/* Lookup the file path */
+				err = GetFileNamePathByID (GPtr, extentInfo->fileID, (filepath + bytesWritten), &filepathlen, NULL, NULL, NULL);
+			} else {
+				/* Get system filename */
+			 	err = GetSystemFileName (extentInfo->fileID, (filepath + bytesWritten), &filepathlen);
+			}
+
+			if (err == noErr) {
+				/* print fileID, filepath */
+				PrintError(GPtr, E_OvlExt, 1, filepath);
+				printMsg = true;
+			}
+				
+			if (GPtr->logLevel >= kDebugLog) {
+			plog ("\textentType=0x%x, startBlock=0x%x, blockCount=0x%x, attrName=%s\n", 
+						 extentInfo->forkType, extentInfo->startBlock, extentInfo->blockCount, extentInfo->attrname);
+			}
+		}
+
+		if (printMsg == false) {
+			/* print only filenumber */
+			sprintf(filenum, "%u", extentInfo->fileID);
+			PrintError(GPtr, E_OvlExt, 1, filenum);
+		}
+	}
+
+	if (filepath) {
+		free (filepath);
+	}
+
+	return;
+} /* PrintOverlapFiles */
+
+/* Function: CompareExtentFileID
+ *
+ * Description: Compares the fileID from two ExtentInfo and return the
+ * comparison result. (since we have to arrange in ascending order)
+ *
+ * Input:
+ *	first and second - void pointers to ExtentInfo structure.
+ *
+ * Output:
+ *	>0 if first > second
+ * 	=0 if first == second
+ *	<0 if first < second
+ */
+static int CompareExtentFileID(const void *first, const void *second)
+{
+	return (((ExtentInfo *)first)->fileID - 
+			((ExtentInfo *)second)->fileID);
+} /* CompareExtentFileID */
+
+/* Function: journal_replay 
+ * 
+ * Description: Replay journal on a journaled HFS+ volume.  This function 
+ * returns success if the volume is not journaled or the journal was not 
+ * dirty.  If there was any error in replaying the journal, a non-zero value
+ * is returned.
+ * 
+ * Output:
+ * 	0 - success, non-zero - failure.
+ */
+int journal_replay(SGlobPtr gptr) 
+{
+	int retval = 0;
+	struct vfsconf vfc;
+	int mib[3];
+	char *devnode;
+	size_t devnodelen;
+
+	if (gptr->deviceNode[0] == '\0') {
+		goto out;
+	}
+
+	retval = getvfsbyname("hfs", &vfc); 
+	if (retval) {
+		goto out;
+	}
+
+	mib[0] = CTL_VFS;
+	mib[1] = vfc.vfc_typenum;
+	mib[2] = HFS_REPLAY_JOURNAL;
+	devnode = gptr->deviceNode;
+	devnodelen = strlen(devnode);
+	retval = sysctl(mib, 3, devnode, &devnodelen, NULL, 0);
+	if (retval) {
+		retval = errno;
+	}
+
+out:
+	return retval;
+}
+ 

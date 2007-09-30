@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2003 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2003, 2005 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  *
@@ -80,6 +80,7 @@ GetVolumeBlock (SVCB *volume, UInt64 blockNum, GetBlockOptions options, BlockDes
 	if (result == 0) {
 		block->blockHeader = buffer;
 		block->buffer = buffer->Buffer;
+		block->blockNum = blockNum;
 		block->blockSize = blockSize;
 		block->blockReadFromDisk = 0;
 		block->fragmented = 0;
@@ -179,6 +180,7 @@ GetFileBlock (SFCB *file, UInt32 blockNum, GetBlockOptions options, BlockDescrip
 
 	block->blockHeader = buffer;
 	block->buffer = buffer->Buffer;
+	block->blockNum = blockNum;
 	block->blockSize = file->fcbBlockSize;
 	block->blockReadFromDisk = 0;
 	block->fragmented = 0;
@@ -275,6 +277,7 @@ ReadFragmentedBlock (SFCB *file, UInt32 blockNum, BlockDescriptor *block)
 	
 	block->buffer = buffer;
 	block->blockHeader = bufs;
+	block->blockNum = blockNum;
 	block->blockSize = blockSize;
 	block->blockReadFromDisk = false;
 	block->fragmented = true;
@@ -290,7 +293,7 @@ ReadFragmentedBlock (SFCB *file, UInt32 blockNum, BlockDescriptor *block)
 		if (result) goto ErrorExit;
 		
 		if (bufs[i]->Length != fragSize) {
-			printf("ReadFragmentedBlock: cache failure (Length != fragSize)\n");
+		plog("ReadFragmentedBlock: cache failure (Length != fragSize)\n");
 			result = -1;
 			goto ErrorExit;
 		}
@@ -342,7 +345,7 @@ WriteFragmentedBlock( SFCB *file, BlockDescriptor *block, int age, uint32_t writ
 	bufEnd = buffer + file->fcbBlockSize;
 
 	if (bufs == NULL) {
-		printf("WriteFragmentedBlock: NULL bufs list!\n");
+	plog("WriteFragmentedBlock: NULL bufs list!\n");
 		return (-1);
 	}
 	
@@ -386,7 +389,7 @@ ReleaseFragmentedBlock (SFCB *file, BlockDescriptor *block, int age)
 	bufs  = (Buf_t **) block->blockHeader;
 
 	if (bufs == NULL) {
-		printf("ReleaseFragmentedBlock: NULL buf list!\n");
+	plog("ReleaseFragmentedBlock: NULL buf list!\n");
 		return (-1);
 	}
 

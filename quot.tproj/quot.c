@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 1999, 2005 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
@@ -52,8 +52,10 @@
  * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include <sys/cdefs.h>
+
 #ifndef lint
-static char rcsid[] = "$Id: quot.c,v 1.1.1.2 2000/01/11 00:40:37 wsanchez Exp $";
+__unused static char rcsid[] = "$Id: quot.c,v 1.3 2005/10/28 02:59:31 lindak Exp $";
 #endif /* not lint */
 
 #include <sys/param.h>
@@ -208,7 +210,7 @@ static int nusers;
 
 static void inituser()
 {
-	register i;
+	register int i;
 	register struct user *usr;
 	
 	if (!nusers) {
@@ -228,7 +230,7 @@ static void inituser()
 
 static void usrrehash()
 {
-	register i;
+	register int i;
 	register struct user *usr, *usrn;
 	struct user *svusr;
 	
@@ -252,7 +254,7 @@ static struct user *user(uid)
 	uid_t uid;
 {
 	register struct user *usr;
-	register i;
+	register int i;
 	struct passwd *pwd;
 	
 	while (1) {
@@ -262,11 +264,11 @@ static struct user *user(uid)
 				usr->uid = uid;
 				
 				if (!(pwd = getpwuid(uid))) {
-					if (usr->name = (char *)malloc(7))
+					if ((usr->name = (char *)malloc(7)))
 						sprintf(usr->name,"#%d",uid);
 				} else {
-					if (usr->name = (char *)
-					    malloc(strlen(pwd->pw_name) + 1))
+					if ((usr->name = (char *)
+					    malloc(strlen(pwd->pw_name) + 1)))
 						strcpy(usr->name,pwd->pw_name);
 				}
 				if (!usr->name) {
@@ -333,7 +335,7 @@ struct fsizes {
 static void initfsizes()
 {
 	register struct fsizes *fp;
-	register i;
+	register int i;
 	
 	for (fp = fsizes; fp; fp = fp->fsz_next) {
 		for (i = FSZCNT; --i >= 0;) {
@@ -352,7 +354,7 @@ static void dofsizes(fd,super,name)
 	struct dinode *ip;
 	daddr_t sz, ksz;
 	struct fsizes *fp, **fsp;
-	register i;
+	register int i;
 	
 	maxino = super->fs_ncg * super->fs_ipg - 1;
 #ifdef	COMPAT
@@ -383,7 +385,7 @@ static void dofsizes(fd,super,name)
 			}
 #else	/* COMPAT */
 			ksz = SIZE(sz);
-			for (fsp = &fsizes; fp = *fsp; fsp = &fp->fsz_next) {
+			for (fsp = &fsizes; (fp = *fsp); fsp = &fp->fsz_next) {
 				if (ksz < fp->fsz_last)
 					break;
 			}
@@ -429,7 +431,7 @@ static void douser(fd,super,name)
 	ino_t inode, maxino;
 	struct user *usr, *usrs;
 	struct dinode *ip;
-	register n;
+	register int n;
 	
 	maxino = super->fs_ncg * super->fs_ipg - 1;
 	for (inode = 0; inode < maxino; inode++) {
@@ -602,7 +604,7 @@ int main(argc,argv)
 		cnt = getmntinfo(&mp,MNT_NOWAIT);
 		for (; --cnt >= 0; mp++) {
 			if (!strncmp(mp->f_fstypename, MOUNT_UFS, MFSNAMELEN)) {
-				if (nm = strrchr(mp->f_mntfromname,'/')) {
+				if ((nm = strrchr(mp->f_mntfromname,'/'))) {
 					sprintf(dev,"/dev/r%s",nm + 1);
 					nm = dev;
 				} else

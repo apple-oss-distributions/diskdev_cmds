@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 1999, 2002, 2005 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
@@ -57,14 +57,16 @@
  * SUCH DAMAGE.
  */
 
+#include <sys/cdefs.h>
+
 #ifndef lint
-static char copyright[] =
+__unused static char copyright[] =
 "@(#) Copyright (c) 1980, 1990, 1993\n\
 	The Regents of the University of California.  All rights reserved.\n";
 #endif /* not lint */
 
 #ifndef lint
-static char sccsid[] = "@(#)quotaon.c	8.1 (Berkeley) 6/6/93";
+__unused static char sccsid[] = "@(#)quotaon.c	8.1 (Berkeley) 6/6/93";
 #endif /* not lint */
 
 /*
@@ -79,6 +81,12 @@ static char sccsid[] = "@(#)quotaon.c	8.1 (Berkeley) 6/6/93";
 #include <ufs/ufs/quota.h>
 #include <stdio.h>
 #include <fstab.h>
+#include <string.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+/* Internal functions */
+void usage(char *whoami);
 
 char *qfname = QUOTAFILENAME;
 char *qfextension[] = INITQFNAMES;
@@ -88,11 +96,21 @@ int	gflag;		/* operate on group quotas */
 int	uflag;		/* operate on user quotas */
 int	vflag;		/* verbose */
 
-main(argc, argv)
+/* Function prototypes */
+#ifdef __APPLE__
+int hasquota(register struct statfs *, int, char **);
+int quotaonoff(register struct statfs *, int, int, char *);
+#else
+int hasquota(register struct fstab *, int, char **);
+int quotaonoff(register struct fstab *, int, int, char *);
+#endif /* __APPLE__ */
+
+int oneof(register char *, register char **, int);
+
+int main(argc, argv)
 	int argc;
 	char **argv;
 {
-	register struct fstab *fs;
 	char ch, *qfnp, *whoami, *rindex();
 	long argnum, done = 0;
 	int i, offmode = 0, errs = 0;
@@ -174,6 +192,7 @@ main(argc, argv)
 	  }
 	}
 #else
+	register struct fstab *fs;
 	setfsent();
 	while ((fs = getfsent()) != NULL) {
 		if (strcmp(fs->fs_vfstype, "ufs") ||
@@ -204,7 +223,7 @@ main(argc, argv)
 	exit(errs);
 }
 
-usage(whoami)
+void usage(whoami)
 	char *whoami;
 {
 
@@ -214,7 +233,7 @@ usage(whoami)
 }
 
 #ifdef __APPLE__
-quotaonoff(fst, offmode, type, qfpathname)
+int quotaonoff(fst, offmode, type, qfpathname)
 	register struct statfs *fst;
 	int offmode, type;
 	char *qfpathname;
@@ -243,7 +262,7 @@ quotaonoff(fst, offmode, type, qfpathname)
 	return (0);
 }
 #else
-quotaonoff(fs, offmode, type, qfpathname)
+int quotaonoff(fs, offmode, type, qfpathname)
 	register struct fstab *fs;
 	int offmode, type;
 	char *qfpathname;
@@ -276,7 +295,7 @@ quotaonoff(fs, offmode, type, qfpathname)
 /*
  * Check to see if target appears in list of size cnt.
  */
-oneof(target, list, cnt)
+int oneof(target, list, cnt)
 	register char *target, *list[];
 	int cnt;
 {
@@ -292,7 +311,7 @@ oneof(target, list, cnt)
  * Check to see if a particular quota is to be enabled.
  */
 #ifdef __APPLE__
-hasquota(fst, type, qfnamep)
+int hasquota(fst, type, qfnamep)
 	register struct statfs *fst;
 	int type;
 	char **qfnamep;
@@ -325,7 +344,7 @@ hasquota(fst, type, qfnamep)
 	return (1);
 }
 #else
-hasquota(fs, type, qfnamep)
+int hasquota(fs, type, qfnamep)
 	register struct fstab *fs;
 	int type;
 	char **qfnamep;
@@ -365,7 +384,7 @@ hasquota(fs, type, qfnamep)
 /*
  * Verify file system is mounted and not readonly.
  */
-readonly(fs)
+int readonly(fs)
 	register struct fstab *fs;
 {
 	struct statfs fsbuf;

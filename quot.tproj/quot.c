@@ -3,21 +3,20 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * "Portions Copyright (c) 1999 Apple Computer, Inc.  All Rights
- * Reserved.  This file contains Original Code and/or Modifications of
- * Original Code as defined in and that are subject to the Apple Public
- * Source License Version 1.0 (the 'License').  You may not use this file
- * except in compliance with the License.  Please obtain a copy of the
- * License at http://www.apple.com/publicsource and read it before using
- * this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
  * 
  * The Original Code and all software distributed under the License are
  * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License."
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -108,10 +107,10 @@ static int headerlen;
 static struct dinode *get_inode(fd,super,ino)
 	int fd;
 	struct fs *super;
-	ino_t ino;
+	u_int32_t ino;
 {
 	static struct dinode *ip;
-	static ino_t last;
+	static u_int32_t last;
 	
 	if (fd < 0) {		/* flush cache */
 		if (ip) {
@@ -174,7 +173,7 @@ static int virtualblocks(super,ip)
 	} else
 		nblk = fragroundup(super,sz);
 	
-	return nblk / 512;
+	return (int) nblk / 512;
 #endif	/* COMPAT */
 }
 
@@ -265,7 +264,7 @@ static struct user *user(uid)
 				
 				if (!(pwd = getpwuid(uid))) {
 					if ((usr->name = (char *)malloc(7)))
-						sprintf(usr->name,"#%d",uid);
+						snprintf(usr->name,7, "#%d",uid);
 				} else {
 					if ((usr->name = (char *)
 					    malloc(strlen(pwd->pw_name) + 1)))
@@ -328,7 +327,7 @@ static void uses(uid,blks,act)
 struct fsizes {
 	struct fsizes *fsz_next;
 	daddr_t fsz_first, fsz_last;
-	ino_t fsz_count[FSZCNT];
+	u_int32_t fsz_count[FSZCNT];
 	daddr_t fsz_sz[FSZCNT];
 } *fsizes;
 
@@ -350,7 +349,7 @@ static void dofsizes(fd,super,name)
 	struct fs *super;
 	char *name;
 {
-	ino_t inode, maxino;
+	u_int32_t inode, maxino;
 	struct dinode *ip;
 	daddr_t sz, ksz;
 	struct fsizes *fp, **fsp;
@@ -428,7 +427,7 @@ static void douser(fd,super,name)
 	struct fs *super;
 	char *name;
 {
-	ino_t inode, maxino;
+	u_int32_t inode, maxino;
 	struct user *usr, *usrs;
 	struct dinode *ip;
 	register int n;
@@ -474,8 +473,8 @@ static void donames(fd,super,name)
 	char *name;
 {
 	int c;
-	ino_t inode, inode1;
-	ino_t maxino;
+	u_int32_t inode, inode1;
+	u_int32_t maxino;
 	struct dinode *ip;
 	
 	maxino = super->fs_ncg * super->fs_ipg - 1;
@@ -605,7 +604,7 @@ int main(argc,argv)
 		for (; --cnt >= 0; mp++) {
 			if (!strncmp(mp->f_fstypename, MOUNT_UFS, MFSNAMELEN)) {
 				if ((nm = strrchr(mp->f_mntfromname,'/'))) {
-					sprintf(dev,"/dev/r%s",nm + 1);
+					snprintf(dev, sizeof(dev), "/dev/r%s",nm + 1);
 					nm = dev;
 				} else
 					nm = mp->f_mntfromname;

@@ -1,23 +1,22 @@
 /*
- * Copyright (c) 2002 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2002-2005, 2007-2008 Apple Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * "Portions Copyright (c) 2002 Apple Computer, Inc.  All Rights
- * Reserved.  This file contains Original Code and/or Modifications of
- * Original Code as defined in and that are subject to the Apple Public
- * Source License Version 1.0 (the 'License').  You may not use this file
- * except in compliance with the License.  Please obtain a copy of the
- * License at http://www.apple.com/publicsource and read it before using
- * this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
  * 
  * The Original Code and all software distributed under the License are
  * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License."
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -80,13 +79,18 @@ void SETOFFSET ( void *buffer, UInt16 btNodeSize, SInt16 recOffset, SInt16 vecOf
 //				exist and the old one will be deleted.  The MDB an alternate MDB
 //				will be updated to point to the new file.  
 //				
-//				The current implementation requires leaf node records to be in 
-//				good shape.  We will rebuild if index nodes are damaged or leaf 
-//				nodes have key order problems but not much else.  The rebuild
-//				relies on the btree scanner code to locate leaf nodes then it
-//				extracts leaf node records and adds them to the new catalog file.
-//				Any kind of insert error will abort the rebuild (leaving the 
-//				existing catalog file as it was found).
+//				The tree is rebuilt by walking through every record.  We use
+//				BTScanNextRecord(), which iterates sequentially through the
+//				nodes in the tree (starting at the first node), and extracts
+//				each record from each leaf node.  It does not use the node
+//				forward or backward links; this allows it to rebuild the tree
+//				when the index nodes are non-reliable, or the leaf node links
+//				are damaged.
+//
+//				The rebuild will be aborted (leaving the existing catalog
+//				as it was found) if there are errors retreiving the nodes or
+//				records, or if there are errors inserting the records into
+//				the new tree.
 //
 //	Inputs:
 //		SGlobPtr->calculatedCatalogBTCB
@@ -234,8 +238,8 @@ OSErr	RebuildCatalogBTree( SGlobPtr theSGlobPtr )
 		{
 #if DEBUG_REBUILD 
 			{
-			plog( "%s - ValidateRecordLength failed! \n", __FUNCTION__ );
-			plog( "%s - record %d in node %d is not recoverable. \n", 
+				plog( "%s - ValidateRecordLength failed! \n", __FUNCTION__ );
+				plog( "%s - record %d in node %d is not recoverable. \n", 
 						__FUNCTION__, (theSGlobPtr->scanState.recordNum - 1), 
 						theSGlobPtr->scanState.nodeNum );
 			}
@@ -251,9 +255,9 @@ OSErr	RebuildCatalogBTree( SGlobPtr theSGlobPtr )
 		{
 #if DEBUG_REBUILD 
 			{
-			plog( "%s - InsertBTreeRecord failed with err %d 0x%02X \n", 
+				plog( "%s - InsertBTreeRecord failed with err %d 0x%02X \n", 
 					__FUNCTION__, myErr, myErr );
-			plog( "%s - record %d in node %d is not recoverable. \n", 
+				plog( "%s - record %d in node %d is not recoverable. \n", 
 						__FUNCTION__, (theSGlobPtr->scanState.recordNum - 1), 
 						theSGlobPtr->scanState.nodeNum );
 				PrintBTreeKey( myCurrentKeyPtr, theSGlobPtr->calculatedCatalogBTCB );
@@ -267,8 +271,8 @@ OSErr	RebuildCatalogBTree( SGlobPtr theSGlobPtr )
 #if SHOW_ELAPSED_TIMES
 	gettimeofday( &myEndTime, &zone );
 	timersub( &myEndTime, &myStartTime, &myElapsedTime );
-plog( "\n%s - rebuild catalog elapsed time \n", __FUNCTION__ );
-plog( ">>>>>>>>>>>>> secs %d msecs %d \n\n", myElapsedTime.tv_sec, myElapsedTime.tv_usec );
+	plog( "\n%s - rebuild catalog elapsed time \n", __FUNCTION__ );
+	plog( ">>>>>>>>>>>>> secs %d msecs %d \n\n", myElapsedTime.tv_sec, myElapsedTime.tv_usec );
 #endif
 
 	if ( btNotFound == myErr )
@@ -895,41 +899,41 @@ static OSErr ValidateRecordLength( 	SGlobPtr theSGlobPtr,
 #if DEBUG_REBUILD 
 static void PrintNodeDescriptor( NodeDescPtr thePtr )
 {
-plog( "\n xxxxxxxx BTNodeDescriptor xxxxxxxx \n" );
-plog( "   fLink %d \n", thePtr->fLink );
-plog( "   bLink %d \n", thePtr->bLink );
-plog( "   kind %d ", thePtr->kind );
+	plog( "\n xxxxxxxx BTNodeDescriptor xxxxxxxx \n" );
+	plog( "   fLink %d \n", thePtr->fLink );
+	plog( "   bLink %d \n", thePtr->bLink );
+	plog( "   kind %d ", thePtr->kind );
 	if ( thePtr->kind == kBTLeafNode )
-	plog( "%s \n", "kBTLeafNode" );
+		plog( "%s \n", "kBTLeafNode" );
 	else if ( thePtr->kind == kBTIndexNode )
-	plog( "%s \n", "kBTIndexNode" );
+		plog( "%s \n", "kBTIndexNode" );
 	else if ( thePtr->kind == kBTHeaderNode )
-	plog( "%s \n", "kBTHeaderNode" );
+		plog( "%s \n", "kBTHeaderNode" );
 	else if ( thePtr->kind == kBTMapNode )
-	plog( "%s \n", "kBTMapNode" );
+		plog( "%s \n", "kBTMapNode" );
 	else
-	plog( "do not know?? \n" );
-plog( "   height %d \n", thePtr->height );
-plog( "   numRecords %d \n", thePtr->numRecords );
+		plog( "do not know?? \n" );
+	plog( "   height %d \n", thePtr->height );
+	plog( "   numRecords %d \n", thePtr->numRecords );
 
 } /* PrintNodeDescriptor */
 
 
 static void PrintBTHeaderRec( BTHeaderRec * thePtr )
 {
-plog( "\n xxxxxxxx BTHeaderRec xxxxxxxx \n" );
-plog( "   treeDepth %d \n", thePtr->treeDepth );
-plog( "   rootNode %d \n", thePtr->rootNode );
-plog( "   leafRecords %d \n", thePtr->leafRecords );
-plog( "   firstLeafNode %d \n", thePtr->firstLeafNode );
-plog( "   lastLeafNode %d \n", thePtr->lastLeafNode );
-plog( "   nodeSize %d \n", thePtr->nodeSize );
-plog( "   maxKeyLength %d \n", thePtr->maxKeyLength );
-plog( "   totalNodes %d \n", thePtr->totalNodes );
-plog( "   freeNodes %d \n", thePtr->freeNodes );
-plog( "   clumpSize %d \n", thePtr->clumpSize );
-plog( "   btreeType 0x%02X \n", thePtr->btreeType );
-plog( "   attributes 0x%02X \n", thePtr->attributes );
+	plog( "\n xxxxxxxx BTHeaderRec xxxxxxxx \n" );
+	plog( "   treeDepth %d \n", thePtr->treeDepth );
+	plog( "   rootNode %d \n", thePtr->rootNode );
+	plog( "   leafRecords %d \n", thePtr->leafRecords );
+	plog( "   firstLeafNode %d \n", thePtr->firstLeafNode );
+	plog( "   lastLeafNode %d \n", thePtr->lastLeafNode );
+	plog( "   nodeSize %d \n", thePtr->nodeSize );
+	plog( "   maxKeyLength %d \n", thePtr->maxKeyLength );
+	plog( "   totalNodes %d \n", thePtr->totalNodes );
+	plog( "   freeNodes %d \n", thePtr->freeNodes );
+	plog( "   clumpSize %d \n", thePtr->clumpSize );
+	plog( "   btreeType 0x%02X \n", thePtr->btreeType );
+	plog( "   attributes 0x%02X \n", thePtr->attributes );
 
 } /* PrintBTHeaderRec */
 
@@ -940,35 +944,35 @@ static void PrintBTreeKey( KeyPtr thePtr, BTreeControlBlock * theBTreeCBPtr )
 	UInt8 *	myPtr = (UInt8 *)thePtr;
 
 	myKeyLength = CalcKeySize( theBTreeCBPtr, thePtr) ;
-plog( "\n xxxxxxxx BTreeKey xxxxxxxx \n" );
-plog( "   length %d \n", myKeyLength );
+	plog( "\n xxxxxxxx BTreeKey xxxxxxxx \n" );
+	plog( "   length %d \n", myKeyLength );
 	for ( i = 0; i < myKeyLength; i++ )
-	plog( "%02X", *(myPtr + i) );
-plog( "\n" );
+		plog( "%02X", *(myPtr + i) );
+	plog( "\n" );
 	
 } /* PrintBTreeKey */
 			
 static void PrintIndexNodeRec( UInt32 theNodeNum )
 {
-plog( "\n xxxxxxxx IndexNodeRec xxxxxxxx \n" );
-plog( "   node number %d \n", theNodeNum );
+	plog( "\n xxxxxxxx IndexNodeRec xxxxxxxx \n" );
+	plog( "   node number %d \n", theNodeNum );
 
 } /* PrintIndexNodeRec */
 			
 static void PrintLeafNodeRec( HFSPlusCatalogFolder * thePtr )
 {
-plog( "\n xxxxxxxx LeafNodeRec xxxxxxxx \n" );
-plog( "   recordType %d ", thePtr->recordType );
+	plog( "\n xxxxxxxx LeafNodeRec xxxxxxxx \n" );
+	plog( "   recordType %d ", thePtr->recordType );
 	if ( thePtr->recordType == kHFSPlusFolderRecord )
-	plog( "%s \n", "kHFSPlusFolderRecord" );
+		plog( "%s \n", "kHFSPlusFolderRecord" );
 	else if ( thePtr->recordType == kHFSPlusFileRecord )
-	plog( "%s \n", "kHFSPlusFileRecord" );
+		plog( "%s \n", "kHFSPlusFileRecord" );
 	else if ( thePtr->recordType == kHFSPlusFolderThreadRecord )
-	plog( "%s \n", "kHFSPlusFolderThreadRecord" );
+		plog( "%s \n", "kHFSPlusFolderThreadRecord" );
 	else if ( thePtr->recordType == kHFSPlusFileThreadRecord )
-	plog( "%s \n", "kHFSPlusFileThreadRecord" );
+		plog( "%s \n", "kHFSPlusFileThreadRecord" );
 	else
-	plog( "do not know?? \n" );
+		plog( "do not know?? \n" );
 
 } /* PrintLeafNodeRec */
 

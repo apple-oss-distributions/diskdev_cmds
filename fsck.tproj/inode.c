@@ -3,21 +3,20 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * "Portions Copyright (c) 1999 Apple Computer, Inc.  All Rights
- * Reserved.  This file contains Original Code and/or Modifications of
- * Original Code as defined in and that are subject to the Apple Public
- * Source License Version 1.0 (the 'License').  You may not use this file
- * except in compliance with the License.  Please obtain a copy of the
- * License at http://www.apple.com/publicsource and read it before using
- * this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
  * 
  * The Original Code and all software distributed under the License are
  * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License."
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -71,7 +70,7 @@
 #include "ufs_byte_order.h"
 #endif	/* REV_ENDIAN_FS */
 
-static ino_t startinum;
+static u_int32_t startinum;
 
 static int iblock __P((struct inodesc *, long ilevel, quad_t isize));
 
@@ -81,7 +80,8 @@ ckinode(dp, idesc)
 	register struct inodesc *idesc;
 {
 	ufs_daddr_t *ap;
-	long ret, n, ndb, offset;
+	long ret, n;
+	int64_t ndb, offset;
 	struct dinode dino;
 	quad_t remsize, sizepb;
 	mode_t mode;
@@ -174,7 +174,7 @@ iblock(idesc, ilevel, isize)
 		for (ap = &bp->b_un.b_indir[nif]; ap < aplim; ap++,rr++) {
 			if (*ap == 0)
 				continue;
-			(void)sprintf(buf, "PARTIALLY TRUNCATED INODE I=%u and nif=%d and rr=%d",
+			(void)snprintf(buf, sizeof(buf), "PARTIALLY TRUNCATED INODE I=%u and nif=%d and rr=%d",
 				idesc->id_number, nif,rr);
 			if (dofix(idesc, buf)) {
 				*ap = 0;
@@ -245,7 +245,7 @@ chkrange(blk, cnt)
  */
 struct dinode *
 ginode(inumber)
-	ino_t inumber;
+	u_int32_t inumber;
 {
 	ufs_daddr_t iblk;
 
@@ -270,13 +270,13 @@ ginode(inumber)
  * Special purpose version of ginode used to optimize first pass
  * over all the inodes in numerical order.
  */
-ino_t nextino, lastinum;
+u_int32_t nextino, lastinum;
 long readcnt, readpercg, fullcnt, inobufsize, partialcnt, partialsize;
 struct dinode *inodebuf;
 
 struct dinode *
 getnextinode(inumber)
-	ino_t inumber;
+	u_int32_t inumber;
 {
 	long size;
 	ufs_daddr_t dblk;
@@ -349,7 +349,7 @@ freeinodebuf()
 void
 cacheino(dp, inumber)
 	register struct dinode *dp;
-	ino_t inumber;
+	u_int32_t inumber;
 {
 	register struct inoinfo *inp;
 	struct inoinfo **inpp;
@@ -368,8 +368,8 @@ cacheino(dp, inumber)
 	if (inumber == ROOTINO)
 		inp->i_parent = ROOTINO;
 	else
-		inp->i_parent = (ino_t)0;
-	inp->i_dotdot = (ino_t)0;
+		inp->i_parent = (u_int32_t)0;
+	inp->i_dotdot = (u_int32_t)0;
 	inp->i_number = inumber;
 	inp->i_isize = dp->di_size;
 	inp->i_numblks = blks * sizeof(ufs_daddr_t);
@@ -392,7 +392,7 @@ cacheino(dp, inumber)
  */
 struct inoinfo *
 getinoinfo(inumber)
-	ino_t inumber;
+	u_int32_t inumber;
 {
 	register struct inoinfo *inp;
 
@@ -484,7 +484,7 @@ findino(idesc)
 
 void
 pinode(ino)
-	ino_t ino;
+	u_int32_t ino;
 {
 	register struct dinode *dp;
 	register char *p;
@@ -511,7 +511,7 @@ pinode(ino)
 
 void
 blkerror(ino, type, blk)
-	ino_t ino;
+	u_int32_t ino;
 	char *type;
 	ufs_daddr_t blk;
 {
@@ -541,12 +541,12 @@ blkerror(ino, type, blk)
 /*
  * allocate an unused inode
  */
-ino_t
+u_int32_t
 allocino(request, type)
-	ino_t request;
+	u_int32_t request;
 	int type;
 {
-	register ino_t ino;
+	register u_int32_t ino;
 	register struct dinode *dp;
 	time_t t;
 
@@ -598,7 +598,7 @@ allocino(request, type)
  */
 void
 freeino(ino)
-	ino_t ino;
+	u_int32_t ino;
 {
 	struct inodesc idesc;
 	struct dinode *dp;

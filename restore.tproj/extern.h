@@ -3,21 +3,20 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * "Portions Copyright (c) 1999 Apple Computer, Inc.  All Rights
- * Reserved.  This file contains Original Code and/or Modifications of
- * Original Code as defined in and that are subject to the Apple Public
- * Source License Version 1.0 (the 'License').  You may not use this file
- * except in compliance with the License.  Please obtain a copy of the
- * License at http://www.apple.com/publicsource and read it before using
- * this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
  * 
  * The Original Code and all software distributed under the License are
  * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License."
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -56,8 +55,8 @@
  *	@(#)extern.h	8.2 (Berkeley) 1/7/94
  */
 
-struct entry	*addentry __P((char *, ino_t, int));
-long		 addfile __P((char *, ino_t, int));
+struct entry	*addentry __P((char *, u_int32_t, int));
+long		 addfile __P((char *, u_int32_t, int));
 void		 badentry __P((struct entry *, char *));
 void	 	 canon __P((char *, char *));
 void		 checkrestore __P((void));
@@ -65,9 +64,9 @@ void		 closemt __P((void));
 void		 createfiles __P((void));
 void		 createleaves __P((char *));
 void		 createlinks __P((void));
-long		 deletefile __P((char *, ino_t, int));
-void		 deleteino __P((ino_t));
-ino_t		 dirlookup __P((const char *));
+long		 deletefile __P((char *, u_int32_t, int));
+void		 deleteino __P((u_int32_t));
+u_int32_t		 dirlookup __P((const char *));
 __dead void 	 done __P((int));
 void		 dumpsymtable __P((char *, long));
 void	 	 extractdirs __P((int));
@@ -76,24 +75,24 @@ void		 findunreflinks __P((void));
 char		*flagvalues __P((struct entry *));
 void		 freeentry __P((struct entry *));
 void		 freename __P((char *));
-int	 	 genliteraldir __P((char *, ino_t));
+int	 	 genliteraldir __P((char *, u_int32_t));
 char		*gentempname __P((struct entry *));
 void		 getfile __P((void (*)(char *, long), void (*)(char *, long)));
 void		 getvol __P((long));
 void		 initsymtable __P((char *));
-int	 	 inodetype __P((ino_t));
+int	 	 inodetype __P((u_int32_t));
 int		 linkit __P((char *, char *, int));
-struct entry	*lookupino __P((ino_t));
+struct entry	*lookupino __P((u_int32_t));
 struct entry	*lookupname __P((char *));
-long		 listfile __P((char *, ino_t, int));
-ino_t		 lowerbnd __P((ino_t));
+long		 listfile __P((char *, u_int32_t, int));
+u_int32_t		 lowerbnd __P((u_int32_t));
 void		 mktempname __P((struct entry *));
 void		 moveentry __P((struct entry *, char *));
 void		 msg __P((const char *, ...));
 char		*myname __P((struct entry *));
 void		 newnode __P((struct entry *));
 void		 newtapebuf __P((long));
-long		 nodeupdates __P((char *, ino_t, int));
+long		 nodeupdates __P((char *, u_int32_t, int));
 void	 	 onintr __P((int));
 void		 panic __P((const char *, ...));
 void		 pathcheck __P((char *));
@@ -117,9 +116,9 @@ void	 	 skipdirs __P((void));
 void		 skipfile __P((void));
 void		 skipmaps __P((void));
 void		 swabst __P((u_char *, u_char *));
-void	 	 treescan __P((char *, ino_t, long (*)(char *, ino_t, int)));
-ino_t		 upperbnd __P((ino_t));
-long		 verifyfile __P((char *, ino_t, int));
+void	 	 treescan __P((char *, u_int32_t, long (*)(char *, u_int32_t, int)));
+u_int32_t		 upperbnd __P((u_int32_t));
+long		 verifyfile __P((char *, u_int32_t, int));
 void		 xtrnull __P((char *, long));
 
 /* From ../dump/dumprmt.c */

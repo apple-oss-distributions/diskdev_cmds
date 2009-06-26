@@ -3,21 +3,20 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * "Portions Copyright (c) 1999 Apple Computer, Inc.  All Rights
- * Reserved.  This file contains Original Code and/or Modifications of
- * Original Code as defined in and that are subject to the Apple Public
- * Source License Version 1.0 (the 'License').  You may not use this file
- * except in compliance with the License.  Please obtain a copy of the
- * License at http://www.apple.com/publicsource and read it before using
- * this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
  * 
  * The Original Code and all software distributed under the License are
  * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License."
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -85,10 +84,10 @@ struct	odirtemplate odirhead = {
 static int chgino __P((struct inodesc *));
 static int dircheck __P((struct inodesc *, struct direct *));
 static int expanddir __P((struct dinode *dp, char *name));
-static void freedir __P((ino_t ino, ino_t parent));
+static void freedir __P((u_int32_t ino, u_int32_t parent));
 static struct direct *fsck_readdir __P((struct inodesc *));
 static struct bufarea *getdirblk __P((ufs_daddr_t blkno, long size));
-static int lftempname __P((char *bufp, ino_t ino));
+static int lftempname __P((char *bufp, u_int32_t ino));
 static int mkentry __P((struct inodesc *));
 
 /*
@@ -307,7 +306,7 @@ dircheck(idesc, dp)
 
 void
 direrror(ino, errmesg)
-	ino_t ino;
+	u_int32_t ino;
 	char *errmesg;
 {
 
@@ -316,7 +315,7 @@ direrror(ino, errmesg)
 
 void
 fileerror(cwd, ino, errmesg)
-	ino_t cwd, ino;
+	u_int32_t cwd, ino;
 	char *errmesg;
 {
 	register struct dinode *dp;
@@ -347,7 +346,7 @@ adjust(idesc, lcnt)
 
 	dp = ginode(idesc->id_number);
 	if (dp->di_nlink == lcnt) {
-		if (linkup(idesc->id_number, (ino_t)0) == 0)
+		if (linkup(idesc->id_number, (u_int32_t)0) == 0)
 			clri(idesc, "UNREF", 0);
 	} else {
 		pwarn("LINK COUNT %s", (lfdir == idesc->id_number) ? lfname :
@@ -432,12 +431,12 @@ chgino(idesc)
 
 int
 linkup(orphan, parentdir)
-	ino_t orphan;
-	ino_t parentdir;
+	u_int32_t orphan;
+	u_int32_t parentdir;
 {
 	register struct dinode *dp;
 	int lostdir;
-	ino_t oldlfdir;
+	u_int32_t oldlfdir;
 	struct inodesc idesc;
 	char tempname[BUFSIZ];
 	extern int pass4check();
@@ -465,7 +464,7 @@ linkup(orphan, parentdir)
 		} else {
 			pwarn("NO lost+found DIRECTORY");
 			if (preen || reply("CREATE")) {
-				lfdir = allocdir(ROOTINO, (ino_t)0, lfmode);
+				lfdir = allocdir(ROOTINO, (u_int32_t)0, lfmode);
 				if (lfdir != 0) {
 					if (makeentry(ROOTINO, lfdir, lfname) != 0) {
 						if (preen)
@@ -491,7 +490,7 @@ linkup(orphan, parentdir)
 		if (reply("REALLOCATE") == 0)
 			return (0);
 		oldlfdir = lfdir;
-		if ((lfdir = allocdir(ROOTINO, (ino_t)0, lfmode)) == 0) {
+		if ((lfdir = allocdir(ROOTINO, (u_int32_t)0, lfmode)) == 0) {
 			pfatal("SORRY. CANNOT CREATE lost+found DIRECTORY\n\n");
 			return (0);
 		}
@@ -520,14 +519,14 @@ linkup(orphan, parentdir)
 	lncntp[orphan]--;
 	if (lostdir) {
 		if ((changeino(orphan, "..", lfdir) & ALTERED) == 0 &&
-		    parentdir != (ino_t)-1)
+		    parentdir != (u_int32_t)-1)
 			(void)makeentry(orphan, lfdir, "..");
 		dp = ginode(lfdir);
 		dp->di_nlink++;
 		inodirty();
 		lncntp[lfdir]++;
 		pwarn("DIR I=%lu CONNECTED. ", orphan);
-		if (parentdir != (ino_t)-1)
+		if (parentdir != (u_int32_t)-1)
 			printf("PARENT WAS I=%u\n", parentdir);
 		if (preen == 0)
 			printf("\n");
@@ -540,9 +539,9 @@ linkup(orphan, parentdir)
  */
 int
 changeino(dir, name, newnum)
-	ino_t dir;
+	u_int32_t dir;
 	char *name;
-	ino_t newnum;
+	u_int32_t newnum;
 {
 	struct inodesc idesc;
 
@@ -561,7 +560,7 @@ changeino(dir, name, newnum)
  */
 int
 makeentry(parent, ino, name)
-	ino_t parent, ino;
+	u_int32_t parent, ino;
 	char *name;
 {
 	struct dinode *dp;
@@ -672,12 +671,12 @@ bad:
 /*
  * allocate a new directory
  */
-ino_t
+u_int32_t
 allocdir(parent, request, mode)
-	ino_t parent, request;
+	u_int32_t parent, request;
 	int mode;
 {
-	ino_t ino;
+	u_int32_t ino;
 	char *cp;
 	struct dinode *dp;
 	register struct bufarea *bp;
@@ -734,7 +733,7 @@ allocdir(parent, request, mode)
  */
 static void
 freedir(ino, parent)
-	ino_t ino, parent;
+	u_int32_t ino, parent;
 {
 	struct dinode *dp;
 
@@ -752,9 +751,9 @@ freedir(ino, parent)
 static int
 lftempname(bufp, ino)
 	char *bufp;
-	ino_t ino;
+	u_int32_t ino;
 {
-	register ino_t in;
+	register u_int32_t in;
 	register char *cp;
 	int namlen;
 

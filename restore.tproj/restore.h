@@ -3,21 +3,20 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * "Portions Copyright (c) 1999 Apple Computer, Inc.  All Rights
- * Reserved.  This file contains Original Code and/or Modifications of
- * Original Code as defined in and that are subject to the Apple Public
- * Source License Version 1.0 (the 'License').  You may not use this file
- * except in compliance with the License.  Please obtain a copy of the
- * License at http://www.apple.com/publicsource and read it before using
- * this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
  * 
  * The Original Code and all software distributed under the License are
  * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License."
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -70,7 +69,7 @@ extern int	yflag;		/* always try to recover from tape errors */
  */
 extern char	*dumpmap; 	/* map of inodes on this dump tape */
 extern char	*usedinomap; 	/* map of inodes that are in use on this fs */
-extern ino_t	maxino;		/* highest numbered inode in this file system */
+extern u_int32_t	maxino;		/* highest numbered inode in this file system */
 extern long	dumpnum;	/* location of the dump on this tape */
 extern long	volno;		/* current volume being read */
 extern long	ntrec;		/* number of TP_BSIZE records per tape block */
@@ -89,7 +88,7 @@ struct entry {
 	u_char	e_namlen;		/* length of this name */
 	char	e_type;			/* type of this entry, see below */
 	short	e_flags;		/* status flags, see below */
-	ino_t	e_ino;			/* inode number in previous file sys */
+	u_int32_t	e_ino;			/* inode number in previous file sys */
 	long	e_index;		/* unique index (for dumpped table) */
 	struct	entry *e_parent;	/* pointer to parent directory (..) */
 	struct	entry *e_sibling;	/* next element in this directory (.) */
@@ -121,7 +120,7 @@ struct entry {
  */
 struct context {
 	char	*name;		/* name of file */
-	ino_t	ino;		/* inumber of file */
+	u_int32_t	ino;		/* inumber of file */
 	struct	dinode *dip;	/* pointer to inode */
 	char	action;		/* action being taken on this file */
 }; 

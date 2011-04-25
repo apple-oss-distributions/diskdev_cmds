@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999, 2005-2008 Apple Inc. All rights reserved.
+ * Copyright (c) 1999, 2005-2011 Apple Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
@@ -270,7 +270,6 @@ enum {
 };
 typedef OptionBits  ReleaseBlockOptions;
 
-
 struct BlockDescriptor{
 	void		*buffer;
 	void		*blockHeader;
@@ -325,7 +324,7 @@ struct SVCB {
 	struct SFCB * 	vcbAttributesFile;
 	struct SFCB * 	vcbStartupFile;
 
-	UInt32		vcbEmbeddedOffset;	/* Sector where HFS+ starts */
+	UInt32		vcbEmbeddedOffset;	/* Byte offset where HFS+ starts */
 	UInt16		vcbFlags;
 	SInt16		vcbDriveNumber;
 	SInt16		vcbDriverReadRef;

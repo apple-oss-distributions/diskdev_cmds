@@ -150,18 +150,42 @@ static int MRepair( SGlobPtr GPtr )
 	OSErr			err;
 	SVCB			*calculatedVCB	= GPtr->calculatedVCB;
 	Boolean			isHFSPlus;
+	Boolean			didRebuild = false;
 
 	isHFSPlus = VolumeObjectIsHFSPlus( );
 
+	if ( GPtr->EBTStat & S_RebuildBTree )
+	{
+		fsckPrint(GPtr->context, hfsRebuildExtentBTree);
+		err = RebuildBTree( GPtr, kHFSExtentsFileID );
+		if (err)
+			return (err);
+		didRebuild = true;
+	}
+
 	if ( GPtr->CBTStat & S_RebuildBTree )
 	{
-		/* we currently only support rebuilding the catalog B-Tree file.  */
 		/* once we do the rebuild we will force another verify since the */
 		/* first verify was aborted when we determined a rebuild was necessary */
-		err = RebuildCatalogBTree( GPtr );
-		return( err );
+		fsckPrint(GPtr->context, hfsRebuildCatalogBTree);
+		err = RebuildBTree( GPtr, kHFSCatalogFileID );
+		if (err)
+			return (err);
+		didRebuild = true;
 	}
  
+	if ( GPtr->ABTStat & S_RebuildBTree )
+	{
+		fsckPrint(GPtr->context, hfsRebuildAttrBTree);
+		err = RebuildBTree( GPtr, kHFSAttributesFileID );
+		if (err)
+			return (err);
+		didRebuild = true;
+	}
+
+	if (didRebuild)
+		return noErr;	// Need to restart the verification
+
  	/*
  	 * If there were unused nodes in the B-trees which were non-zero-filled,
  	 * then zero fill them.
@@ -374,6 +398,20 @@ static int MRepair( SGlobPtr GPtr )
 	if ( GPtr->ABTStat & S_BTM )
 	{
 		err = UpdBTM( GPtr, kCalculatedAttributesRefNum );		//	update attribute BTM
+		ReturnIfError( err );
+	}
+
+	/* Extended attribute repair can also detect incorrect number 
+	 * of thread records, so trigger thread records repair now and 
+	 * come back again in next pass for any fallouts and/or repairing 
+	 * extended attribute inconsistency.
+	 * Note:  This should be removed when Chinese Remainder Theorem 
+	 * is used for detecting incorrect number of thread records 
+	 * (rdar://3968148).
+	 */
+	if ( (GPtr->CBTStat & S_Orphan) != 0 )
+	{
+		err = FixOrphanedFiles ( GPtr );
 		ReturnIfError( err );
 	}
 
@@ -875,6 +913,72 @@ done:
 
 
 /*
+Routine:	FixHardLinkBadDate - fix the date of an indirect-node
+
+Input:		GPtr		-- pointer to scavenger global data
+			p			-- pointer to a minor repair order
+
+Output:		function result:
+				0 -- no error
+				n -- error
+*/
+
+OSErr FixHardLinkBadDate(SGlobPtr GPtr, RepairOrderPtr p)
+{
+	CatalogKey key;
+	CatalogRecord rec;
+	uint16_t recsize;
+	OSErr retval = 0;
+	UInt32 hint;
+
+	retval = GetCatalogRecordByID(GPtr, (UInt32)p->parid, true, &key, &rec, &recsize);
+
+	if (retval == 0) {
+		if (rec.recordType != kHFSPlusFileRecord) {
+			retval = IntError(GPtr, R_IntErr);
+		} else {
+			rec.hfsPlusFile.createDate = p->correct;
+			retval = ReplaceBTreeRecord(GPtr->calculatedCatalogFCB, &key, kNoHint, &rec, recsize, &hint);
+		}
+	}
+
+	return retval;
+
+}
+
+/*
+Routine:	FixFileHardLinkFlag - clear the HardLinkChain flag in a file record
+
+Input:		GPtr		-- pointer to scavenger global data
+			p			-- pointer to minor repair order
+
+Output:		function result:
+				0	-- no error
+				n	-- error
+*/
+
+OSErr FixFileHardLinkFlag(SGlobPtr GPtr, RepairOrderPtr p)
+{
+	CatalogKey key;
+	CatalogRecord rec;
+	uint16_t recsize;
+	OSErr retval = 0;
+	UInt32 hint;
+
+	retval = GetCatalogRecordByID(GPtr, (UInt32)p->parid, true, &key, &rec, &recsize);
+
+	if (retval == 0) {
+		if (rec.recordType != kHFSPlusFileRecord) {
+			retval = IntError(GPtr, R_IntErr);
+		} else {
+			rec.hfsPlusFile.flags &= ~kHFSHasLinkChainMask;
+			retval = ReplaceBTreeRecord(GPtr->calculatedCatalogFCB, &key, kNoHint, &rec, recsize, &hint);
+		}
+	}
+	return retval;
+}
+
+/*
 Routine:	FixPrivDirBadPerms - fix the permissions of the directory hard-link private dir
 
 Input:		GPtr		-- pointer to scavenger global data
@@ -1331,6 +1435,7 @@ static	OSErr	DoMinorOrders( SGlobPtr GPtr )				//	the globals
 				err = DeleteUnlinkedFile( GPtr, p );
 				break;
 
+			case E_FileLinkCountError:
 			case E_InvalidLinkCount:
 				err = FixLinkCount( GPtr, p );
 				break;
@@ -1421,6 +1526,14 @@ static	OSErr	DoMinorOrders( SGlobPtr GPtr )				//	the globals
 
 			case E_DirHardLinkOwnerFlags:
 				err = FixDirLinkOwnerFlags(GPtr, p);
+				break;
+
+			case E_BadHardLinkDate:
+				err = FixHardLinkBadDate(GPtr, p);
+				break;
+
+			case E_LinkChainNonLink:
+				err = FixFileHardLinkFlag(GPtr, p);
 				break;
 
 			default:										//	unknown repair type
@@ -2665,13 +2778,13 @@ static OSErr FixAttrSize(SGlobPtr GPtr, RepairOrderPtr p)
 	result = BTSearchRecord(GPtr->calculatedAttributesFCB, &iterator, 
 				kInvalidMRUCacheKey, &btRecord, &recSize, &iterator);
 	if (result) {
-		dprintf (d_error|d_xattr, "%s: Cannot find attribute record (err = %d)\n", __FUNCTION__, result);
+		DPRINTF (d_error|d_xattr, "%s: Cannot find attribute record (err = %d)\n", __FUNCTION__, result);
 		goto out;
 	}
 
 	/* We should only get record of type kHFSPlusAttrForkData */
 	if (record.recordType != kHFSPlusAttrForkData) {
-		dprintf (d_error|d_xattr, "%s: Record found is not attribute fork data\n", __FUNCTION__);
+		DPRINTF (d_error|d_xattr, "%s: Record found is not attribute fork data\n", __FUNCTION__);
 		result = btNotFound;
 		goto out;
 	}
@@ -2702,7 +2815,7 @@ static OSErr FixAttrSize(SGlobPtr GPtr, RepairOrderPtr p)
 		result = BTReplaceRecord(GPtr->calculatedAttributesFCB, &iterator,
 					&btRecord, recSize);
 		if (result) {
-			dprintf (d_error|d_xattr, "%s: Cannot replace attribute record (err=%d)\n", __FUNCTION__, result);
+			DPRINTF (d_error|d_xattr, "%s: Cannot replace attribute record (err=%d)\n", __FUNCTION__, result);
 			goto out;
 		}
 	}
@@ -2898,7 +3011,7 @@ del_overflow_extents:
 
 		/* Delete the extent record */ 
 		err = DeleteBTreeRecord(GPtr->calculatedExtentsFCB, &extentKey);
-		dprintf (d_info, "%s: Deleting extent overflow for fileID=%u, forkType=%u, startBlock=%u\n", __FUNCTION__, fileID, forkType, foundStartBlock);
+		DPRINTF (d_info, "%s: Deleting extent overflow for fileID=%u, forkType=%u, startBlock=%u\n", __FUNCTION__, fileID, forkType, foundStartBlock);
 		if (err) {
 			goto create_symlink;
 		}
@@ -3449,6 +3562,7 @@ static OSErr GetCatalogRecord(SGlobPtr GPtr, UInt32 fileID, Boolean isHFSPlus, C
 	CatalogKey catThreadKey;
 	CatalogName catalogName;
 	UInt32 hint;
+	uint32_t thread_key_parentID;
 
 	/* Look up for catalog thread record for the file that owns attribute */
 	BuildCatalogKey(fileID, NULL, isHFSPlus, &catThreadKey);
@@ -3474,6 +3588,7 @@ static OSErr GetCatalogRecord(SGlobPtr GPtr, UInt32 fileID, Boolean isHFSPlus, C
 		err = fsBTRecordNotFoundErr; 
 		goto out;
 	}
+	thread_key_parentID = catKey->hfsPlus.parentID;
 	
 	/* It is either a file thread record or folder thread record.
 	 * Look up for catalog record for the file that owns attribute */
@@ -3493,6 +3608,19 @@ static OSErr GetCatalogRecord(SGlobPtr GPtr, UInt32 fileID, Boolean isHFSPlus, C
 				catRecord->hfsPlusFile.flags);
 #endif
 
+	/* For catalog file or folder record, the parentID in the thread 
+	 * record's key should be equal to the fileID in the file/folder 
+	 * record --- which is equal to the ID of the file/folder record
+	 * that is being looked up.  If not, mark the volume for repair. 
+	 */
+	if (thread_key_parentID != catRecord->hfsPlusFile.fileID) {
+		RcdError(GPtr, E_IncorrectNumThdRcd);
+		if (fsckGetVerbosity(GPtr->context) >= kDebugLog) {
+			plog("\t%s: fileID=%u, thread.key.parentID=%u, record.fileID=%u\n", 
+				__FUNCTION__, fileID, thread_key_parentID, catRecord->hfsPlusFile.fileID);
+		}
+		GPtr->CBTStat |= S_Orphan;
+	}
 out:
 	return err;
 }
@@ -4134,16 +4262,16 @@ static OSErr MoveExtent(SGlobPtr GPtr, ExtentInfo *extentInfo)
 	} else { /* kDataFork or kRsrcFork */
 		if (extentInfo->fileID < kHFSFirstUserCatalogNodeID) {
 			/* Ignore these fileIDs in repair.  Bad block file blocks should 
-			 * never be moved.  kHFSRepairCatalogFileID and kHFSBogusExtentFileID 
-			 * are temporary runtime files.  We need to return error to the 
-			 * caller to deallocate disk blocks preallocated during preflight
+			 * never be moved.  kHFSRepairCatalogFileID and kHFSBogusExtentFileID
+			 * are temporary runtime files.  We need to return error to the  caller
+			 * to deallocate disk blocks preallocated during preflight
 			 * to move the overlapping extents.  Any other extent that overlaps
 			 * with these extents might have moved successfully, thus repairing
 			 * the problem.
 			 */
 			if ((extentInfo->fileID == kHFSBadBlockFileID) ||
-				(extentInfo->fileID == kHFSRepairCatalogFileID) ||
-				(extentInfo->fileID == kHFSBogusExtentFileID)) {
+				(extentInfo->fileID == kHFSBogusExtentFileID) ||
+				(extentInfo->fileID == kHFSRepairCatalogFileID)) {
 				err = paramErr;
 				goto out;
 			}
@@ -4164,12 +4292,12 @@ static OSErr MoveExtent(SGlobPtr GPtr, ExtentInfo *extentInfo)
 											  &extentData, &recordSize, &foundExtentIndex);
 				foundLocation = extentsBTree;
 				if (err != noErr) {
-					dprintf (d_error|d_overlap, "%s: No matching extent record found in extents btree for fileID = %d (err=%d)\n", __FUNCTION__, extentInfo->fileID, err);
+					DPRINTF (d_error|d_overlap, "%s: No matching extent record found in extents btree for fileID = %d (err=%d)\n", __FUNCTION__, extentInfo->fileID, err);
 					goto out;
 				}
 			} else {
 				/* No more extents exist for this file */
-				dprintf (d_error|d_overlap, "%s: No matching extent record found for fileID = %d\n", __FUNCTION__, extentInfo->fileID);
+				DPRINTF (d_error|d_overlap, "%s: No matching extent record found for fileID = %d\n", __FUNCTION__, extentInfo->fileID);
 				goto out;
 			}
 		}
@@ -4178,7 +4306,7 @@ static OSErr MoveExtent(SGlobPtr GPtr, ExtentInfo *extentInfo)
 	err = CopyDiskBlocks(GPtr, extentInfo->startBlock, extentInfo->blockCount, 
 						 extentInfo->newStartBlock);
 	if (err != noErr) {
-		dprintf (d_error|d_overlap, "%s: Error in copying disk blocks for fileID = %d (err=%d)\n", __FUNCTION__, extentInfo->fileID, err);
+		DPRINTF (d_error|d_overlap, "%s: Error in copying disk blocks for fileID = %d (err=%d)\n", __FUNCTION__, extentInfo->fileID, err);
 		goto out;
 	}
 	
@@ -4197,7 +4325,7 @@ static OSErr MoveExtent(SGlobPtr GPtr, ExtentInfo *extentInfo)
 
 	}
 	if (err != noErr) {
-	        dprintf (d_error|d_overlap, "%s: Error in updating extent record for fileID = %d (err=%d)\n", __FUNCTION__, extentInfo->fileID, err);
+	        DPRINTF (d_error|d_overlap, "%s: Error in updating extent record for fileID = %d (err=%d)\n", __FUNCTION__, extentInfo->fileID, err);
 		goto out;
 	}
 
@@ -4428,7 +4556,7 @@ static OSErr SearchExtentInAttributeBT(SGlobPtr GPtr, ExtentInfo *extentInfo,
 	result = BTSearchRecord(GPtr->calculatedAttributesFCB, &iterator, 
 				kInvalidMRUCacheKey, &btRecord, recordSize, &iterator);
 	if (result) {
-		dprintf (d_error|d_overlap, "%s: Error finding attribute record (err=%d) for fileID = %d, attrname = %d\n", __FUNCTION__, result, extentInfo->fileID, extentInfo->attrname);
+		DPRINTF (d_error|d_overlap, "%s: Error finding attribute record (err=%d) for fileID = %d, attrname = %d\n", __FUNCTION__, result, extentInfo->fileID, extentInfo->attrname);
 		goto out;	
 	}
 	
@@ -5405,8 +5533,6 @@ FixMissingDirectory( SGlob *GPtr, UInt32 theObjID, UInt32 theParID )
 	OSErr				result;		
 	int					nameLen;
 	UInt32				hint;		
-	UInt32				myItemsCount;		
-	UInt32				myFolderCount;
 	char 				myString[ 32 ];
 	CatalogName			myName;
 	CatalogRecord		catRec;

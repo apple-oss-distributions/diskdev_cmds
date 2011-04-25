@@ -180,8 +180,14 @@ enum {
         E_OvlExtID              =  607, /* Overlapped extent allocation (id) */
         
         E_UnusedNodeNotZeroed	=  608, /* An unused B-tree node is not full of zeroes */
+	E_VBMDamagedOverAlloc	=  609,	/* Volume bitmap has has orphaned block allocation */
+	E_BadHardLinkDate	=  610, /* Bad hard link creation date */
+	E_DirtyJournal		=  611,	/* Journal need to be replayed but volume is read-only */
+	E_LinkChainNonLink	=  612, /* File record has hard link chain flag */
+	E_LinkHasData		= -613, /* Hard link record has data extents */
+	E_FileLinkCountError	=  614, /* File has incorrect link count */
 
-        E_LastError             =  608
+        E_LastError             =  614
 };
 
 #endif

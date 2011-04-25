@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999-2009 Apple Inc. All rights reserved.
+ * Copyright (c) 1999-2011 Apple Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
@@ -750,6 +750,7 @@ typedef struct SGlob {
 	fsck_ctx_t		context;
 	int				chkLevel;
 	int             repairLevel;
+	int             rebuildOptions;			// options to indicate type of btree(s) to rebuild
 	Boolean			minorRepairErrors;	// indicates some minor repairs failed
 	Boolean		minorRepairFalseSuccess;	// indicates minor repair function is returning false success, do not delete from the list
 	int				canWrite;  	// we can safely write to the block device
@@ -784,6 +785,9 @@ typedef struct SGlob {
 	uint32_t	calculated_dirinodes;
 	uint32_t	calculated_dirlinks;
 
+	/* Journal file ID's */
+	uint32_t	journal_file_id;
+	uint32_t	jib_file_id;
 } SGlob, *SGlobPtr;
 
 
@@ -852,6 +856,7 @@ enum
 
 /* Journal status flag (contents of JStat) */
 #define S_BadJournal		0x8000	/* Bad journal content */
+#define	S_DirtyJournal		0x4000	/* Journal is dirty (needs to be replayed) */
 
 /* Print status flag (contents of PrintStat) */
 #define S_DamagedDir 		0x8000	/* message for M_LookDamagedDir already printed */
@@ -905,6 +910,9 @@ enum {																/*	extendFileContigMask		= 0x0002*/
 	kEFAllMask					= 0x01,
 	kEFNoClumpBit				= 2,							/*	Don't round up requested size to multiple of clump size*/
 	kEFNoClumpMask				= 0x04,							/*	TruncateFile option flags*/
+	kEFNoExtOvflwBit			= 3,							/*  Don't use extens overflow file */
+	kEFNoExtOvflwMask			= 0x08,
+
 	kTFTrunExtBit				= 0,							/*	truncate to the extent containing new PEOF*/
 	kTFTrunExtMask				= 1
 };
@@ -1053,6 +1061,8 @@ extern	int	CheckForClean( SGlobPtr GPtr, UInt8 operation, Boolean *modified );
 
 extern  int	CheckIfJournaled(SGlobPtr GPtr, Boolean journal_bit_only);
 
+extern	int	IsJournalEmpty(SGlobPtr);
+
 extern	OSErr	VInfoChk( SGlobPtr GPtr );
 
 extern	OSErr	VLockedChk( SGlobPtr GPtr );
@@ -1070,8 +1080,6 @@ extern void RecordXAttrBits(SGlobPtr GPtr, UInt16 flags, HFSCatalogNodeID fileid
 extern  int FindOrigOverlapFiles(SGlobPtr GPtr);
 
 extern  void PrintOverlapFiles (SGlobPtr GPtr);
-
-extern int journal_replay(SGlobPtr gptr);
 
 /* ------------------------------- From SVerify2.c -------------------------------- */
 
@@ -1098,9 +1106,9 @@ extern	OSErr	ChkExtRec ( SGlobPtr GPtr, const void *extents , unsigned int *last
 extern	int		BTCheckUnusedNodes(SGlobPtr GPtr, short fileRefNum, UInt16 *btStat);
 
 
-/* -------------------------- From SRebuildCatalogBTree.c ------------------------- */
+/* -------------------------- From SRebuildBTree.c ------------------------- */
 
-extern	OSErr 	RebuildCatalogBTree( SGlobPtr theSGlobPtr );
+extern	OSErr 	RebuildBTree( SGlobPtr theSGlobPtr, int FileID );
 
 
 /* -------------------------- From SCatalog.c ------------------------- */
@@ -1354,6 +1362,7 @@ OSErr BlockAllocate (SVCB *vcb, UInt32 startingBlock, UInt32 blocksRequested, UI
 			Boolean forceContiguous, UInt32 *actualStartBlock, UInt32 *actualNumBlocks);
 OSErr	BlockDeallocate ( SVCB *vcb, UInt32 firstBlock, UInt32 numBlocks);
 UInt32	DivideAndRoundUp( UInt32 numerator, UInt32 denominator);
+OSErr	BlockFindAll(SFCB *fcb, UInt32 needed);
 
 OSErr InitializeBlockCache ( UInt32 blockSize, UInt32 blockCount );
 
@@ -1407,6 +1416,8 @@ extern int  ReleaseBitmapBits(UInt32 startBit, UInt32 bitCount);
 extern int  CheckVolumeBitMap(SGlobPtr g, Boolean repair);
 extern void UpdateFreeBlockCount(SGlobPtr g);
 extern int 	AllocateContigBitmapBits (SVCB *vcb, UInt32 numBlocks, UInt32 *actualStartBlock);
+extern int  IsTrimSupported(void);
+extern void TrimFreeBlocks(SGlobPtr g);
 
 /*
  * Variables and routines to support mapping a physical block number to a

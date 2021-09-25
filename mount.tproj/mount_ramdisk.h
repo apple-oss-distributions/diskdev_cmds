@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2020 Apple Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  *
@@ -21,30 +21,17 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
-//  edt_fstab.h
-//
-//  Created on 12/11/2018.
-//
-
-#ifndef edt_fstab_h
-#define edt_fstab_h
+#ifndef __MOUNT_RAMDISK__
+#define __MOUNT_RAMDISK__
 
 #include <TargetConditionals.h>
 
 #if (TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR)
 
-#include <stdlib.h>
+#include <fstab.h>
+// returns 0 upon success and a valid sysexit or errno code upon failure
+int create_mount_ramdisk(struct fstab *fs, int init_flags, char *options);
 
-#define RAMDISK_FS_SPEC         "ramdisk"
+#endif /* (TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR) */
 
-/*
- *		get_boot_container, get_data_volume - return the bsd name of the requested
- *		device upon success. Null otherwise.
- */
-const char          *get_boot_container(uint32_t *os_env);
-const char          *get_data_volume(void);
-
-int                 get_boot_manifest_hash(char *boot_manifest_hash, size_t boot_manifest_hash_len);
-#endif
-
-#endif /* edt_fstab_h */
+#endif /* __MOUNT_RAMDISK__ */

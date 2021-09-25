@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 1999 - 2020 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  *
@@ -21,30 +21,10 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
-//  edt_fstab.h
-//
-//  Created on 12/11/2018.
-//
+#ifndef __VFSLIST_H__
+#define __VFSLIST_H__
 
-#ifndef edt_fstab_h
-#define edt_fstab_h
+int checkvfsname(const char *vfsname, const char **vfslist);
+const char **makevfslist(char *fslist);
 
-#include <TargetConditionals.h>
-
-#if (TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR)
-
-#include <stdlib.h>
-
-#define RAMDISK_FS_SPEC         "ramdisk"
-
-/*
- *		get_boot_container, get_data_volume - return the bsd name of the requested
- *		device upon success. Null otherwise.
- */
-const char          *get_boot_container(uint32_t *os_env);
-const char          *get_data_volume(void);
-
-int                 get_boot_manifest_hash(char *boot_manifest_hash, size_t boot_manifest_hash_len);
-#endif
-
-#endif /* edt_fstab_h */
+#endif /* __VFSLIST_H__ */

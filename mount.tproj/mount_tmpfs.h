@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2020-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  *
@@ -21,8 +21,8 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
-#ifndef __MOUNT_RAMDISK__
-#define __MOUNT_RAMDISK__
+#ifndef __MOUNT_TMPFS__
+#define __MOUNT_TMPFS__
 
 #include <TargetConditionals.h>
 
@@ -30,8 +30,8 @@
 
 #include <fstab.h>
 // returns 0 upon success and a valid sysexit or errno code upon failure
-int create_mount_ramdisk(struct fstab *fs, int init_flags, char *options);
+int create_tmpfs_mount(struct fstab *fs, char *options);
 
 #endif /* (TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR) */
 
-#endif /* __MOUNT_RAMDISK__ */
+#endif /* __MOUNT_TMPFS__ */
